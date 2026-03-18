@@ -1,0 +1,36 @@
+{
+  "name": "vsql",
+  "version": "1.1.0",
+  "description": "VibeSQL command-line interface — query, manage schemas, and seed data",
+  "bin": {
+    "vsql": "./bin/vsql.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "bin/",
+    "dist/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "vibesql",
+    "postgresql",
+    "cli",
+    "database",
+    "sql"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PayEz-Net/vsql.git"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^5.7"
+  }
+}
