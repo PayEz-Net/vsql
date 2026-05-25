@@ -29,17 +29,29 @@ function stripTrailingSlash(host: string): string {
   return host.replace(/\/$/, '');
 }
 
+/**
+ * Build the Authorization header. Bearer-only (v1.2.0): the token must be a
+ * JWT (3 non-empty base64url parts); a non-JWT fails loud — the legacy
+ * Secret / api-key path is removed, so we never silently send a Secret header.
+ */
+function authHeader(token: string): string {
+  const parts = token.split('.');
+  const isJwt = parts.length === 3 && parts.every(p => p.length > 0 && /^[A-Za-z0-9_-]+$/.test(p));
+  if (!isJwt) fatal('INVALID_TOKEN', 'Stored access token is not a JWT.', 'Run `vsql login` to authenticate.');
+  return `Bearer ${token}`;
+}
+
 async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(url, init).catch(() => null);
   if (!res) fatal('CONNECTION_FAILED', `Could not connect to ${url}`, 'Check that the VibeSQL server is running and the host is correct');
   return res;
 }
 
-export async function query(host: string, key: string, sql: string): Promise<QueryResult> {
+export async function query(host: string, token: string, sql: string): Promise<QueryResult> {
   const res = await safeFetch(`${stripTrailingSlash(host)}/v1/query`, {
     method: 'POST',
     headers: {
-      'Authorization': `Secret ${key}`,
+      'Authorization': authHeader(token),
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ sql }),
@@ -61,9 +73,9 @@ export async function health(host: string): Promise<{ status: string; version?: 
   return { status: body.status ?? 'healthy', version: body.version, latencyMs };
 }
 
-export async function getVersions(host: string, key: string, collection: string): Promise<SchemaVersion[]> {
+export async function getVersions(host: string, token: string, collection: string): Promise<SchemaVersion[]> {
   const res = await safeFetch(`${stripTrailingSlash(host)}/v1/schemas/${encodeURIComponent(collection)}/versions`, {
-    headers: { 'Authorization': `Secret ${key}` },
+    headers: { 'Authorization': authHeader(token) },
   });
 
   const body = await res.json() as { success: boolean; data?: SchemaVersion[]; error?: { code?: string; message?: string } };
@@ -75,18 +87,18 @@ export async function getVersions(host: string, key: string, collection: string)
   }));
 }
 
-export async function getActiveSchema(host: string, key: string, collection: string): Promise<{ version: number; schema: unknown; created_at: string }> {
-  const versions = await getVersions(host, key, collection);
+export async function getActiveSchema(host: string, token: string, collection: string): Promise<{ version: number; schema: unknown; created_at: string }> {
+  const versions = await getVersions(host, token, collection);
   const active = versions.find(v => v.is_active);
   if (!active) fatal('NO_ACTIVE_SCHEMA', `No active schema found for "${collection}".`);
   return { version: active.version, schema: active.json_schema, created_at: active.created_at };
 }
 
-export async function updateSchema(host: string, key: string, collection: string, schema: unknown, clientId: number = 0): Promise<{ success: boolean; table_count?: number; version?: number }> {
+export async function updateSchema(host: string, token: string, collection: string, schema: unknown, clientId: number = 0): Promise<{ success: boolean; table_count?: number; version?: number }> {
   const res = await safeFetch(`${stripTrailingSlash(host)}/v1/schemas/${encodeURIComponent(collection)}`, {
     method: 'PUT',
     headers: {
-      'Authorization': `Secret ${key}`,
+      'Authorization': authHeader(token),
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ clientId, jsonSchema: typeof schema === 'string' ? schema : JSON.stringify(schema) }),
@@ -97,11 +109,11 @@ export async function updateSchema(host: string, key: string, collection: string
   return { success: true, table_count: body.data?.table_count, version: body.data?.version };
 }
 
-export async function insertDocument(host: string, key: string, collection: string, table: string, data: Record<string, unknown>, clientId: number = 0): Promise<{ id?: number }> {
+export async function insertDocument(host: string, token: string, collection: string, table: string, data: Record<string, unknown>, clientId: number = 0): Promise<{ id?: number }> {
   const res = await safeFetch(`${stripTrailingSlash(host)}/v1/collections/${encodeURIComponent(collection)}/tables/${encodeURIComponent(table)}`, {
     method: 'POST',
     headers: {
-      'Authorization': `Secret ${key}`,
+      'Authorization': authHeader(token),
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ clientId, data: typeof data === 'string' ? data : JSON.stringify(data) }),
@@ -112,12 +124,12 @@ export async function insertDocument(host: string, key: string, collection: stri
   return { id: body.data?.document_id ?? body.data?.id };
 }
 
-export async function rollback(host: string, key: string, collection: string, targetVersion?: number): Promise<{ collection: string; restored_version: number; table_count: number; message: string }> {
+export async function rollback(host: string, token: string, collection: string, targetVersion?: number): Promise<{ collection: string; restored_version: number; table_count: number; message: string }> {
   const bodyObj = targetVersion != null ? { targetVersion } : {};
   const res = await safeFetch(`${stripTrailingSlash(host)}/v1/schemas/${encodeURIComponent(collection)}/rollback`, {
     method: 'POST',
     headers: {
-      'Authorization': `Secret ${key}`,
+      'Authorization': authHeader(token),
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(bodyObj),

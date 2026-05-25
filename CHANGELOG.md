@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 — 2026-05-25
+
+### Changed / BREAKING
+- **Auth migrated to IDP device-code login** — authentication now yields a Bearer/JWT obtained from the IDP (`vsql login`), configured via `VSQL_IDP_URL` + `VSQL_CLIENT_ID` (both required; the CLI fails loud if either is unset). The Stripe-style API key path (`vsk_*` keys, `VIBESQL_KEY` env var, `Authorization: Secret`) is **REMOVED** — `config init` no longer issues a key. Run `vsql login`. Host resolution drops the silent `http://localhost:52411` default; set `--host` / `VSQL_HOST` / a profile host or the CLI fails loud.
+
+### Added
+- **`vsql login`** — Authenticate via IDP device-code flow (default), or `--passwordless <email>` / `--email <email>` for the email passwordless flow. Tokens are stored per profile and refreshed automatically before expiry.
+- **`vsql logout`** — Clear stored tokens from the profile.
+
 ## 1.1.0 — 2026-03-18
 
 Initial public release.

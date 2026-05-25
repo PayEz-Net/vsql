@@ -21,13 +21,18 @@ npx @vibesql/cli query "SELECT 1"
 ## Quick Start
 
 ```bash
-# 1. Configure your connection
-vibesql config init
-# ? VibeSQL host: https://vibesql.online
-# ? API key: vsk_live_abc123
-# Config saved to ~/.vibesql/config.json
+# 1. Point the CLI at your IDP + server
+export VSQL_IDP_URL=https://idp.payez.net
+export VSQL_CLIENT_ID=your_oauth_client_id
+export VSQL_HOST=https://vibesql.online
 
-# 2. Run a query
+# 2. Authenticate (device-code flow)
+vibesql login
+# Go to: https://idp.payez.net/auth/device
+# Enter code: ABCD-1234
+# Approved. Tokens saved.
+
+# 3. Run a query
 vibesql query "SELECT * FROM users LIMIT 5"
 ```
 
@@ -48,7 +53,7 @@ vibesql query "SELECT id, name FROM users" | head -5   # pipe-friendly
 - `--format <table|json|csv|raw>` — Output format (default: `table`, auto-switches to `csv` when piped)
 - `--file <path>` — Read SQL from a file instead of inline
 - `--host <url>` — Override VibeSQL server URL
-- `--key <key>` — Override API key
+- `--profile <name>` — Use a named auth profile
 
 ### `vibesql tables`
 
@@ -91,18 +96,35 @@ Rolling back "my_collection" to version 14:
 Type the collection name to confirm: my_collection
 ```
 
-### `vibesql config <init|set|show|clear>`
+### `vibesql login` / `vibesql logout`
 
-Manage saved connection profiles.
+Authenticate against the IDP. Tokens (access + refresh) are stored per profile and
+refreshed automatically when they expire.
 
 ```bash
-vibesql config init                             # interactive setup
-vibesql config init --profile production        # named profile
-vibesql config set host https://vibesql.online  # set a value
-vibesql config set key vsk_live_abc123
-vibesql config show                             # display config (keys masked)
-vibesql config clear                            # wipe config
+vibesql login                              # device-code flow (default)
+vibesql login --passwordless you@email.com # email passwordless flow
+vibesql login --profile production         # authenticate a named profile
+vibesql logout                             # clear tokens from the profile
 ```
+
+Device-code flow prints a code and a URL — approve it in your browser, and the CLI
+saves the resulting Bearer/JWT. Passwordless emails you a 6-digit code.
+
+Requires `VSQL_IDP_URL` and `VSQL_CLIENT_ID` to be set (see [Authentication](#authentication)).
+
+### `vibesql config <set|show|clear>`
+
+Manage saved connection profiles. Hosts are set here; **tokens come from `vibesql login`**.
+
+```bash
+vibesql config set host https://vibesql.online  # set the host for a profile
+vibesql config set host http://localhost:52411 --profile local
+vibesql config show                             # display config (tokens masked)
+vibesql config clear                            # wipe all profiles
+```
+
+> `vibesql config init` no longer takes an API key — it just points you to `vibesql login`.
 
 Config is stored at `~/.vibesql/config.json`:
 
@@ -110,11 +132,13 @@ Config is stored at `~/.vibesql/config.json`:
 {
   "default": {
     "host": "https://vibesql.online",
-    "key": "vsk_live_abc123"
+    "auth_method": "device-code",
+    "access_token": "<jwt>",
+    "refresh_token": "<token>",
+    "expires_at": "2026-05-25T18:00:00.000Z"
   },
-  "rosa": {
-    "host": "http://10.0.0.93:52411",
-    "key": "vsk_test_xyz789"
+  "local": {
+    "host": "http://localhost:52411"
   }
 }
 ```
@@ -185,19 +209,27 @@ When stdout is piped (non-TTY), the default format automatically switches from `
 
 ## Authentication
 
-The CLI uses Stripe-style prefixed API keys:
+The CLI authenticates against the PayEz IDP and uses a Bearer/JWT access token. Log in
+once with `vibesql login`; the CLI stores the access + refresh tokens per profile and
+refreshes them automatically before they expire.
 
-| Prefix | Environment |
-|--------|-------------|
-| `vsk_live_` | Production |
-| `vsk_test_` | Development / staging |
+Two login flows are supported:
 
-**Resolution order:**
-1. `--key` flag (highest priority)
-2. `VIBESQL_KEY` environment variable
-3. Config file (`~/.vibesql/config.json`)
+| Flow | Command | What happens |
+|------|---------|--------------|
+| Device-code (default) | `vibesql login` | Prints a user code + URL; approve in the browser. |
+| Passwordless | `vibesql login --passwordless <email>` | Emails a 6-digit code you enter at the prompt. |
 
-Host resolves the same way (`--host` > `VIBESQL_HOST` > config > `http://localhost:52411`).
+**Required environment:**
+
+| Variable | Purpose |
+|----------|---------|
+| `VSQL_IDP_URL` | IDP base URL (e.g. `https://idp.payez.net`). No default — set it or login fails loud. |
+| `VSQL_CLIENT_ID` | Your IDP OAuth client id. No default. |
+
+**Host resolution:** `--host` > `VSQL_HOST` env > profile host. There is **no silent
+`localhost` default** — if no host is set, the CLI fails loud rather than hitting the
+wrong server.
 
 ## Architecture
 
@@ -207,7 +239,7 @@ The CLI is a thin wrapper over the VibeSQL Server HTTP API. It doesn't know or c
 - **VibeSQL Edge** (`https://edge.idealvibe.online`)
 - **vibesql-micro** (`http://localhost:5173`)
 
-All three speak the same protocol: `POST /v1/query` with `Authorization: Secret <key>`.
+All three speak the same protocol: `POST /v1/query` with `Authorization: Bearer <jwt>`.
 
 ```
 CLI ──→ Edge Server ──→ VibeSQL Server ──→ PostgreSQL
