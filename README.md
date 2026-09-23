@@ -1,273 +1,147 @@
-# @vibesql/cli
+# vsql
 
-A terminal-native interface for [VibeSQL](https://vibesql.online). Query, inspect, and manage VibeSQL databases from the command line.
+A terminal interface for the hosted [VibeSQL](https://vibesql.online) API: query your data, manage collection schemas, and insert documents.
 
 ```bash
-vibesql query "SELECT * FROM users LIMIT 5"
+vsql query "SELECT * FROM notes LIMIT 5"
 ```
 
-Zero runtime dependencies. Node.js 18+. Works on Windows, macOS, and Linux.
+Zero runtime dependencies. Node.js 18+. Windows, macOS and Linux.
 
 ## Install
 
-```bash
-# Global install
-npm install -g @vibesql/cli
-
-# Or run without installing
-npx @vibesql/cli query "SELECT 1"
-```
-
-## Quick Start
+`vsql` is not on npm yet: the `@vibesql/cli` name is not published, and the npm package called `vsql` belongs to someone else, so `npm install -g @vibesql/cli` does not work. Install from GitHub:
 
 ```bash
-# 1. Point the CLI at your IDP + server
-export VSQL_IDP_URL=https://idp.payez.net
-export VSQL_CLIENT_ID=your_oauth_client_id
-export VSQL_HOST=https://vibesql.online
+# From a release (https://github.com/PayEz-Net/vsql/releases): download the source archive, then in its folder
+npm install && npm run build && npm link
 
-# 2. Authenticate (device-code flow)
-vibesql login
-# Go to: https://idp.payez.net/auth/device
-# Enter code: ABCD-1234
-# Approved. Tokens saved.
-
-# 3. Run a query
-vibesql query "SELECT * FROM users LIMIT 5"
+# Or from a clone
+git clone https://github.com/PayEz-Net/vsql.git && cd vsql
+npm install && npm run build && npm link
 ```
+
+`npm link` puts `vsql` on your PATH.
+
+## Two ways to authenticate, for two jobs
+
+| For | Use | Covers |
+|-----|-----|--------|
+| **You, at the terminal: schemas, DDL, admin, ad-hoc queries** | Your **sign-in** (`vsql login`, device code). The primary path. | every command |
+| **An app's runtime calls** (a test app, a script, a service) | Your **KeelBase client id + KeelBase secret** from the KeelBase page | `query`, `health`, `schema show`, `rollback --list`, `insert` |
+
+Schema changes (`schema update`, `rollback`) always use your sign-in: with a KeelBase secret set they are refused and point you at `vsql login`.
+
+## Quick start: sign in (primary)
+
+```bash
+export VSQL_IDP_URL=https://idp.payez.net   # the identity service
+export VSQL_CLIENT_ID=<your IdP client id>  # the client you sign in on
+export VSQL_HOST=<the VibeSQL API URL>      # the hosted VibeSQL API
+
+vsql login                                   # device code (default)
+vsql query "SELECT 1 AS ok"
+```
+
+> **The device approval screen does not exist yet.** `vsql login` prints a user code and a verification URL; that URL answers **401** today (a known gap). Until the screen ships, a device code is approved by a call the **signed-in user** makes to the identity service, after completing 2FA:
+>
+> ```
+> POST {VSQL_IDP_URL}/api/ExternalAuth/agent-device/approve
+> Authorization: Bearer <your own access token>
+> Content-Type: application/json
+>
+> { "user_code": "ABCD-1234" }
+> ```
+>
+> **Never give your user code to anyone else to approve:** whoever approves it signs the CLI in as *themselves*. The account also needs the `vibe_agents_user` role on its client; if the approve answers 403 saying so, ask your administrator to grant it.
+>
+> `vsql login --passwordless you@example.com` (an emailed 6-digit code) avoids the approval step altogether.
+
+Tokens (access + refresh) are stored per profile in `~/.vsql/config.json` and refreshed automatically.
+
+## Key-signing with a KeelBase secret (optional, for app runtime calls)
+
+The KeelBase page in the portal issues a **KeelBase client id** (`vibe_…`) and a **KeelBase secret** (base64, shown once). The SDK calls them `VIBE_CLIENT_ID` and `VIBE_HMAC_KEY`; so does `vsql`, so one `.env` serves both.
+
+```bash
+export VSQL_IDP_URL=https://idp.payez.net   # or IDP_URL
+export VIBE_CLIENT_ID=vibe_...              # KeelBase client id
+export VIBE_HMAC_KEY=...                    # KeelBase secret - keep it in .env, never commit it
+
+vsql health                                  # proves the id + secret: the identity service checks the signature
+vsql query "SELECT 1 AS ok"
+```
+
+With both variables set, every call goes through the identity service's proxy (`POST {IdP}/api/vibe/proxy`), signed `base64(HMAC-SHA256(base64decode(secret), "{unix seconds}|{METHOD}|{endpoint}"))`. What to know:
+
+- **The secret is read from the environment only**: never from a command-line argument, never written to `~/.vsql/config.json`, never printed (`VSQL_DEBUG=1` shows each request's target, not the secret).
+- **Setting only one of the two variables is an error**, not a silent fall-back to your sign-in.
+- **Rotation is immediate.** Rotating the secret on the KeelBase page stops the old one at once; update your `.env` first.
+- **The secret is shown once.** If you lose it, rotate it.
+- **The signature covers the timestamp, method and endpoint, not the request body.** A fix is tracked.
+- `--host` does not apply in this mode; unset the two variables to use `--host` with `vsql login`.
 
 ## Commands
 
-### `vibesql query <sql>`
-
-Execute SQL and display results.
+### `vsql query <sql>`
 
 ```bash
-vibesql query "SELECT * FROM users LIMIT 5"
-vibesql query "SELECT * FROM users" --format json
-vibesql query --file ./reports/monthly.sql
-vibesql query "SELECT id, name FROM users" | head -5   # pipe-friendly
+vsql query "SELECT * FROM notes LIMIT 5"
+vsql query "SELECT * FROM notes" --format json
+vsql query --file ./reports/monthly.sql
 ```
 
-**Options:**
-- `--format <table|json|csv|raw>` — Output format (default: `table`, auto-switches to `csv` when piped)
-- `--file <path>` — Read SQL from a file instead of inline
-- `--host <url>` — Override VibeSQL server URL
-- `--profile <name>` — Use a named auth profile
+The hosted query endpoint is **read-only for tenant data** until row-level security lands. Row writes go through `vsql insert` and schema changes through `vsql schema update`; a write sent to `query` gets the API's own refusal, printed as it comes. `tables` and `describe` read `information_schema`, which the same guard refuses on the hosted API.
 
-### `vibesql tables`
+Options: `--format <table|json|csv|raw>` (default `table`, `csv` when piped), `--file <path>`, `--host <url>`, `--profile <name>`.
 
-List all tables in a schema.
+### `vsql schema show <collection>` / `vsql schema update <collection> --file schema.json`
 
 ```bash
-vibesql tables                        # default: public schema
-vibesql tables --schema vibe_agents   # specific schema
+vsql schema show keelbase_demo
+vsql schema update keelbase_demo --file schema.json --dry-run
+vsql schema update keelbase_demo --file schema.json --yes
 ```
 
-### `vibesql describe <table>`
+`update` sends the file's JSON as the new schema version and activates it (sign-in only).
 
-Show column details — name, type, nullable, default.
+### `vsql insert <collection> <table>`
 
 ```bash
-vibesql describe users
-vibesql describe agent_profiles --format json
+vsql insert keelbase_demo notes --data '{"title":"hello"}'
+vsql insert keelbase_demo notes --file rows.json --batch   # each element of a JSON array
 ```
 
-### `vibesql rollback <collection>`
+The document is sent as-is; the collection's schema decides the required fields. The tenant comes from your credential. `--client-id` is accepted for old scripts and ignored.
 
-Roll back a VibeSQL schema collection to a previous version.
+### `vsql rollback <collection>`
 
 ```bash
-vibesql rollback my_collection --list           # show version history
-vibesql rollback my_collection --dry-run        # preview changes without applying
-vibesql rollback my_collection --version 14     # roll back to specific version
-vibesql rollback my_collection --yes            # skip confirmation prompt
+vsql rollback keelbase_demo --list           # version history (works with a KeelBase secret)
+vsql rollback keelbase_demo --dry-run
+vsql rollback keelbase_demo --version 3      # sign-in only
 ```
 
-Requires typing the collection name to confirm (unless `--yes` is passed):
+### `vsql login` / `vsql logout` / `vsql config <set|show|clear>` / `vsql health` / `vsql version`
+
+`config show` masks tokens and, when key-signing is configured, names the KeelBase client id and says whether the secret is set. It never prints the secret.
+
+## Errors
+
+Errors go to stderr with a code and a hint; exit code 1. A reply that is not JSON (an error page, an empty 404) is reported with its HTTP status and the start of the body:
 
 ```
-Rolling back "my_collection" to version 14:
-  Current: 9 tables (version 16, active)
-  Target:  7 tables (version 14)
-  Tables removed: orders_v2, temp_staging
-  Tables added: (none)
-
-Type the collection name to confirm: my_collection
+Error [BAD_RESPONSE]: HTTP 404: (empty body)
+  Hint: The server does not have this route; check the host (or VSQL_IDP_URL) points at VibeSQL.
 ```
 
-### `vibesql login` / `vibesql logout`
-
-Authenticate against the IDP. Tokens (access + refresh) are stored per profile and
-refreshed automatically when they expire.
+## Development
 
 ```bash
-vibesql login                              # device-code flow (default)
-vibesql login --passwordless you@email.com # email passwordless flow
-vibesql login --profile production         # authenticate a named profile
-vibesql logout                             # clear tokens from the profile
+npm install
+npm test        # builds, then runs the tests in test/
 ```
-
-Device-code flow prints a code and a URL — approve it in your browser, and the CLI
-saves the resulting Bearer/JWT. Passwordless emails you a 6-digit code.
-
-Requires `VSQL_IDP_URL` and `VSQL_CLIENT_ID` to be set (see [Authentication](#authentication)).
-
-### `vibesql config <set|show|clear>`
-
-Manage saved connection profiles. Hosts are set here; **tokens come from `vibesql login`**.
-
-```bash
-vibesql config set host https://vibesql.online  # set the host for a profile
-vibesql config set host http://localhost:52411 --profile local
-vibesql config show                             # display config (tokens masked)
-vibesql config clear                            # wipe all profiles
-```
-
-> `vibesql config init` no longer takes an API key — it just points you to `vibesql login`.
-
-Config is stored at `~/.vibesql/config.json`:
-
-```json
-{
-  "default": {
-    "host": "https://vibesql.online",
-    "auth_method": "device-code",
-    "access_token": "<jwt>",
-    "refresh_token": "<token>",
-    "expires_at": "2026-05-25T18:00:00.000Z"
-  },
-  "local": {
-    "host": "http://localhost:52411"
-  }
-}
-```
-
-### `vibesql health`
-
-Check server connectivity.
-
-```bash
-vibesql health
-# vibesql.online: healthy (45ms, v2.0.0)
-
-vibesql health --host http://localhost:52411
-# localhost:52411: healthy (3ms)
-```
-
-### `vibesql version`
-
-```bash
-vibesql version
-# vibesql-cli v1.0.0
-```
-
-## Output Formats
-
-### Table (default)
-
-```
-┌────┬──────────┬─────────────────────┐
-│ id │ name     │ created_at          │
-├────┼──────────┼─────────────────────┤
-│  1 │ Alice    │ 2026-01-15T09:30:00 │
-│  2 │ Bob      │ 2026-02-20T14:15:00 │
-└────┴──────────┴─────────────────────┘
-2 rows (45ms)
-```
-
-### JSON (`--format json`)
-
-```json
-[
-  { "id": 1, "name": "Alice", "created_at": "2026-01-15T09:30:00" },
-  { "id": 2, "name": "Bob", "created_at": "2026-02-20T14:15:00" }
-]
-```
-
-### CSV (`--format csv`)
-
-```
-id,name,created_at
-1,Alice,2026-01-15T09:30:00
-2,Bob,2026-02-20T14:15:00
-```
-
-### Raw (`--format raw`)
-
-Full API response including metadata:
-
-```json
-{
-  "success": true,
-  "data": [...],
-  "meta": { "rowCount": 2, "executionTimeMs": 45.23 }
-}
-```
-
-When stdout is piped (non-TTY), the default format automatically switches from `table` to `csv`.
-
-## Authentication
-
-The CLI authenticates against the PayEz IDP and uses a Bearer/JWT access token. Log in
-once with `vibesql login`; the CLI stores the access + refresh tokens per profile and
-refreshes them automatically before they expire.
-
-Two login flows are supported:
-
-| Flow | Command | What happens |
-|------|---------|--------------|
-| Device-code (default) | `vibesql login` | Prints a user code + URL; approve in the browser. |
-| Passwordless | `vibesql login --passwordless <email>` | Emails a 6-digit code you enter at the prompt. |
-
-**Required environment:**
-
-| Variable | Purpose |
-|----------|---------|
-| `VSQL_IDP_URL` | IDP base URL (e.g. `https://idp.payez.net`). No default — set it or login fails loud. |
-| `VSQL_CLIENT_ID` | Your IDP OAuth client id. No default. |
-
-**Host resolution:** `--host` > `VSQL_HOST` env > profile host. There is **no silent
-`localhost` default** — if no host is set, the CLI fails loud rather than hitting the
-wrong server.
-
-## Architecture
-
-The CLI is a thin wrapper over the VibeSQL Server HTTP API. It doesn't know or care whether it's talking to:
-
-- **VibeSQL Server** directly (`http://localhost:52411`)
-- **VibeSQL Edge** (`https://edge.idealvibe.online`)
-- **vibesql-micro** (`http://localhost:5173`)
-
-All three speak the same protocol: `POST /v1/query` with `Authorization: Bearer <jwt>`.
-
-```
-CLI ──→ Edge Server ──→ VibeSQL Server ──→ PostgreSQL
-     (auth + rate limit)   (query exec)      (data)
-```
-
-## Error Handling
-
-Errors print to stderr with a code and hint. Exit code 1.
-
-```bash
-$ vibesql query "SELCT * FROM users"
-Error [INVALID_SQL]: You have an error in your SQL syntax
-  Hint: Check for typos near "SELCT"
-
-$ vibesql health --host http://unreachable:52411
-Error [CONNECTION_FAILED]: Could not connect to http://unreachable:52411
-  Hint: Check that the VibeSQL server is running and the host is correct
-```
-
-## Technical Details
-
-- **Language:** TypeScript (ESM)
-- **Runtime:** Node.js 18+
-- **Dependencies:** Zero runtime. Uses built-in `fetch`, `fs`, `path`, `readline`.
-- **Core logic:** ~200 lines across 5 source files
-- **Package:** `@vibesql/cli` on npm
 
 ## License
 
-MIT
+Apache-2.0 (see `package.json` and `LICENSE`).

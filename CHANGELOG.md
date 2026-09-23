@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.3.0 — 2026-09-23
+
+Re-synced with the hosted VibeSQL API, plus optional key-signing with a KeelBase secret. The routes were read from the API's source and measured on dev-93.
+
+### Changed / BREAKING
+- **The CLI targets the hosted VibeSQL API's routes.** v1.2.0 had drifted from it on four:
+  - `query`: `POST /v1/query` (404 on the API) → `POST /v1/vsql/query`. The hosted query is read-only for tenant data until row-level security lands; writes get the API's own refusal.
+  - `schema update`: `PUT` (405) with a string schema (400 `NOT_OBJECT`) → `POST /v1/schemas/{collection}` with `jsonSchema` as an object.
+  - `insert`: the document was wrapped as `{ clientId, data: "<string>" }` (400 `REQUIRED_FIELDS_MISSING`) → the document itself is the body.
+  - `schema show` / `rollback --list`: read `is_active` / `json_schema`, but the API answers camelCase, so every schema looked inactive (`NO_ACTIVE_SCHEMA` right after a successful create). Both spellings are read now.
+  - `health` uses the API's public `/health`.
+- A self-hosted VibeSQL Server, Edge or vibesql-micro speaking `POST /v1/query` is no longer a target of this CLI. For local work, use vibesql-micro's own `vsql-micro`.
+- `--client-id` is ignored: the tenant comes from the credential.
+
+### Added
+- **Key-signing (optional, for app runtime calls):** set `VIBE_CLIENT_ID` (KeelBase client id) and `VIBE_HMAC_KEY` (KeelBase secret) and calls go through the identity service's proxy, `POST {IdP}/api/vibe/proxy`, HMAC-signed. Covers `query`, `health`, `schema show`, `rollback --list` and `insert`. Schema changes are refused with a secret; they use `vsql login`.
+  - The secret is read from the environment only, and is never logged, written to config or passed in argv.
+  - Setting only one of the two variables fails loud.
+- `VSQL_DEBUG=1` prints each request's target to stderr, never a credential.
+- `config show` names the KeelBase client id when key-signing is configured, and whether the secret is set.
+- Tests (`npm test`):
+  - the signature is checked against vectors computed by the identity service's own verifier;
+  - one test per route pins the recorded contract;
+  - key-signing is checked for its proxy request shape, for keeping the secret off the wire and out of debug output, and for refusing DDL.
+
+### Fixed
+- An empty or non-JSON reply printed a raw `SyntaxError` stack trace; it now reports the HTTP status and the start of the body.
+
+### Docs
+- **README:** the install line is now true (GitHub, not npm).
+- **README:** it says plainly that the device approval screen does not exist yet, and how a code is approved today.
+
 ## 1.2.0 — 2026-05-25
 
 ### Changed / BREAKING

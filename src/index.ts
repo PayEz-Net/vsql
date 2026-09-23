@@ -2,8 +2,8 @@ import { readFileSync } from 'fs';
 import { createInterface } from 'readline';
 import * as client from './client.js';
 import {
-  resolveAuth,
-  resolveHost,
+  resolveConn,
+  resolveHealthConn,
   getProfile,
   setProfileHost,
   saveProfile,
@@ -19,7 +19,7 @@ import {
 import { formatRows, detectFormat, type Format } from './format.js';
 import { fatal } from './errors.js';
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 interface Flags {
   host?: string;
@@ -323,11 +323,11 @@ async function run(): Promise<void> {
 
   switch (command) {
     case 'query': {
-      const { host, token } = await resolveAuth(flags);
+      const conn = await resolveConn(flags);
       let sql = positional;
       if (flags.file) sql = readFileSync(flags.file, 'utf-8').trim();
       if (!sql) fatal('NO_QUERY', 'No SQL provided.', 'Pass SQL as argument or use --file.');
-      const result = await client.query(host, token, sql);
+      const result = await client.query(conn, sql);
       const rows = result.data ?? result.rows ?? [];
       const format = detectFormat(flags.format);
       const meta = result.meta ?? { rowCount: result.rowCount, executionTimeMs: result.executionTime };
@@ -336,10 +336,10 @@ async function run(): Promise<void> {
     }
 
     case 'tables': {
-      const { host, token } = await resolveAuth(flags);
+      const conn = await resolveConn(flags);
       const schema = flags.schema ?? 'public';
       const sql = `SELECT table_name FROM information_schema.tables WHERE table_schema = '${schema}' ORDER BY table_name`;
-      const result = await client.query(host, token, sql);
+      const result = await client.query(conn, sql);
       const rows = result.data ?? result.rows ?? [];
       const format = detectFormat(flags.format);
       console.log(formatRows(rows, format));
@@ -348,9 +348,9 @@ async function run(): Promise<void> {
 
     case 'describe': {
       if (!positional) fatal('NO_TABLE', 'No table name provided.', 'Usage: vsql describe <table>');
-      const { host, token } = await resolveAuth(flags);
+      const conn = await resolveConn(flags);
       const sql = `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = '${positional}' ORDER BY ordinal_position`;
-      const result = await client.query(host, token, sql);
+      const result = await client.query(conn, sql);
       const rows = result.data ?? result.rows ?? [];
       if (rows.length === 0) fatal('TABLE_NOT_FOUND', `Table "${positional}" not found or has no columns.`);
       const format = detectFormat(flags.format);
@@ -360,11 +360,12 @@ async function run(): Promise<void> {
 
     case 'rollback': {
       if (!positional) fatal('NO_COLLECTION', 'No collection name provided.', 'Usage: vsql rollback <collection>');
-      const { host, token } = await resolveAuth(flags);
+      const conn = await resolveConn(flags);
       const collection = positional;
+      if (!flags.list && !flags['dry-run']) client.refuseDdlWithKey(conn, 'rollback');
 
       if (flags.list) {
-        const versions = await client.getVersions(host, token, collection);
+        const versions = await client.getVersions(conn, collection);
         if (versions.length === 0) { console.log('No versions found.'); break; }
         for (const v of versions) {
           const tables = getTableNames(v.json_schema);
@@ -375,7 +376,7 @@ async function run(): Promise<void> {
       }
 
       if (flags['dry-run']) {
-        const versions = await client.getVersions(host, token, collection);
+        const versions = await client.getVersions(conn, collection);
         const active = versions.find(v => v.is_active);
         const targetVer = flags.version ?? (versions.find(v => !v.is_active)?.version);
         const target = versions.find(v => v.version === targetVer);
@@ -393,7 +394,7 @@ async function run(): Promise<void> {
       }
 
       if (!flags.yes) {
-        const versions = await client.getVersions(host, token, collection);
+        const versions = await client.getVersions(conn, collection);
         const active = versions.find(v => v.is_active);
         const targetVer = flags.version ?? (versions.find(v => !v.is_active)?.version);
         const target = versions.find(v => v.version === targetVer);
@@ -412,7 +413,7 @@ async function run(): Promise<void> {
         if (answer !== collection) { console.log('Rollback cancelled.'); break; }
       }
 
-      const result = await client.rollback(host, token, collection, flags.version);
+      const result = await client.rollback(conn, collection, flags.version);
       console.log(`Rolled back "${collection}" to version ${result.restored_version} (${result.table_count} tables).`);
       break;
     }
@@ -422,8 +423,8 @@ async function run(): Promise<void> {
       if (sub === 'show') {
         const collection = positionals[1];
         if (!collection) fatal('NO_COLLECTION', 'No collection name provided.', 'Usage: vsql schema show <collection>');
-        const { host, token } = await resolveAuth(flags);
-        const active = await client.getActiveSchema(host, token, collection);
+        const conn = await resolveConn(flags);
+        const active = await client.getActiveSchema(conn, collection);
         const tables = getTableNames(active.schema);
         console.log(`${collection} v${active.version} (${tables.length} tables, ${active.created_at})`);
         console.log('');
@@ -432,13 +433,14 @@ async function run(): Promise<void> {
         const collection = positionals[1];
         if (!collection) fatal('NO_COLLECTION', 'No collection name provided.', 'Usage: vsql schema update <collection> --file schema.json');
         if (!flags.file) fatal('NO_FILE', 'No schema file provided.', 'Usage: vsql schema update <collection> --file schema.json');
-        const { host, token } = await resolveAuth(flags);
+        const conn = await resolveConn(flags);
+        if (!flags['dry-run']) client.refuseDdlWithKey(conn, 'schema update');
         const newSchema = JSON.parse(readFileSync(flags.file, 'utf-8'));
 
         if (flags['dry-run'] || !flags.yes) {
           let currentTables: string[] = [];
           try {
-            const current = await client.getActiveSchema(host, token, collection);
+            const current = await client.getActiveSchema(conn, collection);
             currentTables = getTableNames(current.schema);
           } catch { /* no existing schema */ }
           const newTables = getTableNames(newSchema);
@@ -455,8 +457,7 @@ async function run(): Promise<void> {
           if (answer !== collection) { console.log('Update cancelled.'); break; }
         }
 
-        const cid = flags['client-id'] ?? 0;
-        const result = await client.updateSchema(host, token, collection, newSchema, cid);
+        const result = await client.updateSchema(conn, collection, newSchema);
         console.log(`Schema updated: "${collection}" (${result.table_count ?? getTableNames(newSchema).length} tables).`);
       } else {
         console.log('Usage: vsql schema <show|update> <collection>');
@@ -468,7 +469,7 @@ async function run(): Promise<void> {
       const collection = positional;
       const table = positionals[1];
       if (!collection || !table) fatal('MISSING_ARGS', 'Collection and table required.', 'Usage: vsql insert <collection> <table> --file doc.json');
-      const { host, token } = await resolveAuth(flags);
+      const conn = await resolveConn(flags);
 
       let docs: Record<string, unknown>[];
       if (flags.file) {
@@ -480,10 +481,10 @@ async function run(): Promise<void> {
         fatal('NO_DATA', 'No data provided.', 'Use --file <path> or --data \'{"key":"value"}\'');
       }
 
-      const cid = flags['client-id'] ?? 0;
+      // v1.3.0: the tenant comes from the credential; --client-id is accepted for old scripts and ignored.
       let inserted = 0;
       for (const doc of docs) {
-        const result = await client.insertDocument(host, token, collection, table, doc, cid);
+        const result = await client.insertDocument(conn, collection, table, doc);
         inserted++;
         if (!flags.batch || docs.length === 1) {
           console.log(`Inserted document${result.id != null ? ` (id: ${result.id})` : ''} into ${collection}.${table}`);
@@ -542,9 +543,10 @@ async function run(): Promise<void> {
     }
 
     case 'health': {
-      const host = resolveHost(flags);
-      const result = await client.health(host);
-      const hostname = host.replace(/^https?:\/\//, '');
+      const conn = resolveHealthConn(flags);
+      const result = await client.health(conn);
+      const target = conn.kind === 'key' ? `${conn.idp} (KeelBase ${conn.clientId})` : conn.host;
+      const hostname = target.replace(/^https?:\/\//, '');
       const ver = result.version ? `, ${result.version}` : '';
       console.log(`${hostname}: ${result.status} (${result.latencyMs}ms${ver})`);
       break;
@@ -594,6 +596,14 @@ Environment:
   VSQL_HOST             Default server URL
   VSQL_IDP_URL          IDP base URL (required for login/refresh)
   VSQL_CLIENT_ID        IDP OAuth client id (required for login/refresh)
+  VIBE_CLIENT_ID        KeelBase client id (vibe_...) - key-signing, for app runtime calls
+  VIBE_HMAC_KEY         KeelBase secret (base64) - key-signing; never pass it as an argument
+  VSQL_DEBUG            Set to 1 to print each request's target to stderr (never a credential)
+
+Key-signing (VIBE_CLIENT_ID + VIBE_HMAC_KEY set): calls go through the identity service
+(VSQL_IDP_URL) signed with your KeelBase secret. It covers query, health, schema show,
+rollback --list and insert. Schema changes (schema update, rollback) use your sign-in:
+run \`vsql login\` with the two variables unset.
 
 Examples:
   vsql login
