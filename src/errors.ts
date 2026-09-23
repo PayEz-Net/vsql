@@ -12,6 +12,7 @@ export function handleApiError(body: { success: false; error?: { code?: string; 
     UNSAFE_QUERY: 'Use WHERE 1=1 to explicitly update all rows',
     UNAUTHORIZED: 'Your session may have expired. Run `vsql login` to re-authenticate.',
     VERSION_NOT_FOUND: 'Use `vsql rollback <collection> --list` to see available versions',
+    FORBIDDEN: '`vsql query` is read-only SQL. Use `vsql schema update` for DDL, `vsql insert` for row writes, `vsql rows` to read collection rows.',
   };
   fatal(code, message, hints[code]);
 }

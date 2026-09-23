@@ -19,7 +19,7 @@ import {
 import { formatRows, detectFormat, type Format } from './format.js';
 import { fatal } from './errors.js';
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 interface Flags {
   host?: string;
@@ -34,6 +34,8 @@ interface Flags {
   yes?: boolean;
   batch?: boolean;
   'client-id'?: number;
+  limit?: string;
+  page?: string;
   email?: string;
   passwordless?: string;
 }
@@ -480,18 +482,43 @@ async function run(): Promise<void> {
         fatal('NO_DATA', 'No data provided.', 'Use --file <path> or --data \'{"key":"value"}\'');
       }
 
-      const cid = flags['client-id'] ?? 0;
       let inserted = 0;
       for (const doc of docs) {
-        const result = await client.insertDocument(host, token, collection, table, doc, cid);
+        const result = await client.insertDocument(host, token, collection, table, doc);
         inserted++;
         if (!flags.batch || docs.length === 1) {
-          console.log(`Inserted document${result.id != null ? ` (id: ${result.id})` : ''} into ${collection}.${table}`);
+          const keys = result.generatedKeys && Object.keys(result.generatedKeys).length > 0
+            ? ` ${Object.entries(result.generatedKeys).map(([k, v]) => `${k}=${v}`).join(', ')}` : '';
+          console.log(`Inserted document${result.id != null ? ` (id: ${result.id})` : ''} into ${collection}.${table}${keys}`);
         }
       }
       if (flags.batch && docs.length > 1) {
         console.log(`Inserted ${inserted} documents into ${collection}.${table}`);
       }
+      break;
+    }
+
+    case 'rows': {
+      const collection = positional;
+      const table = positionals[1];
+      if (!collection || !table) fatal('MISSING_ARGS', 'Collection and table required.', 'Usage: vsql rows <collection> <table> [--limit 20] [--page 1]');
+      const { host, token } = await resolveAuth(flags);
+      const pageSize = Number(flags.limit ?? 20);
+      const page = Number(flags.page ?? 1);
+      const result = await client.listRows(host, token, collection, table, page, pageSize);
+      const format = detectFormat(flags.format);
+      console.log(formatRows(result.rows, format, { rowCount: result.rows.length }));
+      if (result.total != null && result.total > result.rows.length) {
+        console.error(`(${result.rows.length} of ${result.total}; use --page / --limit for more)`);
+      }
+      break;
+    }
+
+    case 'collections': {
+      const { host, token } = await resolveAuth(flags);
+      const list = await client.listCollections(host, token);
+      const format = detectFormat(flags.format);
+      console.log(formatRows(list, format));
       break;
     }
 
@@ -567,12 +594,14 @@ Usage: vsql <command> [options]
 Commands:
   login                    Authenticate via IDP (device-code by default)
   logout                   Clear stored tokens from the profile
-  query <sql>              Execute a SQL query
-  tables                   List all tables
-  describe <table>         Show column details for a table
+  query <sql>              Run a read-only SQL query
+  tables                   List SQL tables (information_schema)
+  describe <table>         Show column details for a SQL table
+  collections              List your collections
   schema show <collection> Dump active JSON schema
-  schema update <col>      Push schema from file
+  schema update <col>      Create or replace a collection schema from a file (DDL)
   insert <col> <table>     Insert documents
+  rows <col> <table>       List documents in a collection table
   rollback <collection>    Roll back a schema collection
   config <sub>             Manage connection profiles (init|set|show|clear)
   health                   Check server connectivity
@@ -587,6 +616,8 @@ Options:
   --file <path>         Read SQL/schema/doc from a file
   --data <json>         Inline JSON for insert
   --batch               Insert each element of a JSON array
+  --limit <n>           Rows per page for \`rows\` (default 20)
+  --page <n>            Page for \`rows\` (default 1)
   --dry-run             Show diff without applying
   --yes                 Skip confirmation prompt
 
@@ -595,6 +626,10 @@ Environment:
   VSQL_IDP_URL          IDP base URL (required for login/refresh)
   VSQL_CLIENT_ID        IDP OAuth client id (required for login/refresh)
 
+Notes:
+  \`query\` is read-only SQL. Change structure with \`schema update\`, write rows with
+  \`insert\`, and read collection rows with \`rows\`.
+
 Examples:
   vsql login
   vsql login --passwordless you@example.com
@@ -602,6 +637,7 @@ Examples:
   vsql schema show vibe_agents
   vsql schema update vibe_agents --file schema.json
   vsql insert vibe_agents agents --file agent.json
+  vsql rows vibe_agents agents --limit 5
   vsql rollback my_schema --list`);
       break;
   }

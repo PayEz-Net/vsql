@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.0 - 2026-09-23
+
+Re-synced with the current Vibe API. Tested end to end against dev-93 as a developer account.
+
+### Fixed
+- **`vsql query`** now calls `POST /v1/vsql/query`. It used `/v1/query`, which the Vibe API does not serve (404). The route is read-only SQL; a refused statement prints which command to use instead.
+- **`vsql schema update`** now sends `POST /v1/schemas/{collection}` with `jsonSchema` as a JSON object. It sent PUT (405) with a string (400 NOT_OBJECT).
+- **`vsql insert`** now sends the document fields at the top level, not wrapped in `{ data }` (400 REQUIRED_FIELDS_MISSING). It prints generated keys.
+- **`vsql schema show` / `rollback --list`** read the API's camelCase fields (`jsonSchema`, `isActive`, `createdAt`). They reported "no active schema" for a live one.
+- **`vsql health`** uses the service's `/health`.
+- An empty or non-JSON response is now a named error with the HTTP status and route, not a raw `SyntaxError` stack trace.
+
+### Added
+- **`vsql rows <collection> <table>`**: list documents (`--limit`, `--page`, `--format`).
+- **`vsql collections`**: list your collections with document counts.
+- A `prepare` script, so `npm install -g github:PayEz-Net/vsql` builds on install.
+
+### Docs
+- The README uses the real command name (`vsql`), the GitHub install and the read-only query rule.
+
+
 ## 1.2.0 — 2026-05-25
 
 ### Changed / BREAKING

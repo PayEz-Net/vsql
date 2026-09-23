@@ -47,8 +47,39 @@ async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
   return res;
 }
 
+/**
+ * Read a JSON body without ever throwing a raw parser stack trace. An empty or non-JSON body
+ * becomes a named error carrying the HTTP status and the route, which is what the user needs
+ * to act on (a 404 here almost always means VSQL_HOST points at the wrong service).
+ */
+async function readJson<T>(res: Response, url: string): Promise<T> {
+  const text = await res.text().catch(() => '');
+  const route = url.replace(/^https?:\/\/[^/]+/, '');
+  if (!text.trim()) {
+    const hint = res.status === 401 ? 'Your session may have expired. Run `vsql login` to re-authenticate.'
+      : res.status === 404 ? 'This server has no such route. Check that VSQL_HOST points at the Vibe API.'
+      : res.status === 405 ? 'The server refused this method on that route. Update the CLI.'
+      : undefined;
+    fatal(`HTTP_${res.status}`, `Empty response from ${route} (HTTP ${res.status}).`, hint);
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    fatal(`HTTP_${res.status}`, `Non-JSON response from ${route} (HTTP ${res.status}): ${text.slice(0, 200)}`);
+  }
+}
+
+type ApiBody<T> = { success: boolean; data?: T; error?: { code?: string; message?: string } };
+
+function failIfError<T>(body: ApiBody<T>): void {
+  if (!body.success) handleApiError(body as { success: false; error?: { code?: string; message?: string } });
+}
+
 export async function query(host: string, token: string, sql: string): Promise<QueryResult> {
-  const res = await safeFetch(`${stripTrailingSlash(host)}/v1/query`, {
+  // The Vibe API serves SQL at /v1/vsql/query. It is READ-ONLY by design (no client row-scope yet):
+  // DDL goes through `vsql schema update`, row writes through `vsql insert`.
+  const url = `${stripTrailingSlash(host)}/v1/vsql/query`;
+  const res = await safeFetch(url, {
     method: 'POST',
     headers: {
       'Authorization': authHeader(token),
@@ -57,34 +88,42 @@ export async function query(host: string, token: string, sql: string): Promise<Q
     body: JSON.stringify({ sql }),
   });
 
-  const body = await res.json() as QueryResult;
+  const body = await readJson<QueryResult>(res, url);
   if (!body.success) handleApiError(body as { success: false; error?: { code?: string; message?: string } });
   return body;
 }
 
 export async function health(host: string): Promise<{ status: string; version?: string; latencyMs: number }> {
   const start = Date.now();
-  const res = await safeFetch(`${stripTrailingSlash(host)}/v1/health`);
+  const url = `${stripTrailingSlash(host)}/health`;
+  const res = await safeFetch(url);
   const latencyMs = Date.now() - start;
 
   if (!res.ok) fatal('CONNECTION_FAILED', `Health check failed (HTTP ${res.status})`, 'Check that the VibeSQL server is running and the host is correct');
 
-  const body = await res.json() as HealthResult;
+  const body = await readJson<HealthResult>(res, url);
   return { status: body.status ?? 'healthy', version: body.version, latencyMs };
 }
 
 export async function getVersions(host: string, token: string, collection: string): Promise<SchemaVersion[]> {
-  const res = await safeFetch(`${stripTrailingSlash(host)}/v1/schemas/${encodeURIComponent(collection)}/versions`, {
-    headers: { 'Authorization': authHeader(token) },
-  });
+  const url = `${stripTrailingSlash(host)}/v1/schemas/${encodeURIComponent(collection)}/versions`;
+  const res = await safeFetch(url, { headers: { 'Authorization': authHeader(token) } });
 
-  const body = await res.json() as { success: boolean; data?: SchemaVersion[]; error?: { code?: string; message?: string } };
-  if (!body.success) handleApiError(body as { success: false; error?: { code?: string; message?: string } });
-  // json_schema may come as string from VibeSQL Server — parse it
-  return (body.data ?? []).map(v => ({
-    ...v,
-    json_schema: typeof v.json_schema === 'string' ? JSON.parse(v.json_schema) : v.json_schema,
-  }));
+  // The Vibe API answers in camelCase (jsonSchema, isActive, createdAt); older servers used snake_case.
+  const body = await readJson<ApiBody<Record<string, unknown>[]>>(res, url);
+  failIfError(body);
+  return (body.data ?? []).map(v => {
+    const raw = (v.jsonSchema ?? v.json_schema) as unknown;
+    return {
+      collection_schema_id: Number(v.collectionSchemaId ?? v.collection_schema_id),
+      collection: String(v.collection),
+      json_schema: typeof raw === 'string' ? JSON.parse(raw) : raw,
+      version: Number(v.version),
+      is_active: Boolean(v.isActive ?? v.is_active),
+      created_at: String(v.createdAt ?? v.created_at),
+      created_by: (v.createdBy ?? v.created_by ?? null) as string | null,
+    };
+  });
 }
 
 export async function getActiveSchema(host: string, token: string, collection: string): Promise<{ version: number; schema: unknown; created_at: string }> {
@@ -95,38 +134,69 @@ export async function getActiveSchema(host: string, token: string, collection: s
 }
 
 export async function updateSchema(host: string, token: string, collection: string, schema: unknown, clientId: number = 0): Promise<{ success: boolean; table_count?: number; version?: number }> {
-  const res = await safeFetch(`${stripTrailingSlash(host)}/v1/schemas/${encodeURIComponent(collection)}`, {
-    method: 'PUT',
-    headers: {
-      'Authorization': authHeader(token),
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ clientId, jsonSchema: typeof schema === 'string' ? schema : JSON.stringify(schema) }),
-  });
-
-  const body = await res.json() as { success: boolean; data?: { table_count?: number; version?: number }; error?: { code?: string; message?: string } };
-  if (!body.success) handleApiError(body as { success: false; error?: { code?: string; message?: string } });
-  return { success: true, table_count: body.data?.table_count, version: body.data?.version };
-}
-
-export async function insertDocument(host: string, token: string, collection: string, table: string, data: Record<string, unknown>, clientId: number = 0): Promise<{ id?: number }> {
-  const res = await safeFetch(`${stripTrailingSlash(host)}/v1/collections/${encodeURIComponent(collection)}/tables/${encodeURIComponent(table)}`, {
+  const url = `${stripTrailingSlash(host)}/v1/schemas/${encodeURIComponent(collection)}`;
+  // POST creates or replaces the collection schema. jsonSchema goes as a JSON OBJECT; the API rejects a string (NOT_OBJECT).
+  const jsonSchema = typeof schema === 'string' ? JSON.parse(schema) : schema;
+  const payload: Record<string, unknown> = { jsonSchema };
+  if (clientId) payload.clientId = clientId;
+  const res = await safeFetch(url, {
     method: 'POST',
     headers: {
       'Authorization': authHeader(token),
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ clientId, data: typeof data === 'string' ? data : JSON.stringify(data) }),
+    body: JSON.stringify(payload),
   });
 
-  const body = await res.json() as { success: boolean; data?: { id?: number; document_id?: number }; error?: { code?: string; message?: string } };
-  if (!body.success) handleApiError(body as { success: false; error?: { code?: string; message?: string } });
-  return { id: body.data?.document_id ?? body.data?.id };
+  const body = await readJson<ApiBody<{ version?: number; tableCount?: number; table_count?: number }>>(res, url);
+  failIfError(body);
+  return { success: true, table_count: body.data?.tableCount ?? body.data?.table_count, version: body.data?.version };
+}
+
+export async function insertDocument(host: string, token: string, collection: string, table: string, data: Record<string, unknown>): Promise<{ id?: number; generatedKeys?: Record<string, unknown> }> {
+  const url = `${stripTrailingSlash(host)}/v1/collections/${encodeURIComponent(collection)}/tables/${encodeURIComponent(table)}`;
+  // The document IS the body: its fields go at the top level, not wrapped in { data }.
+  const res = await safeFetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': authHeader(token),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(data),
+  });
+
+  const body = await readJson<ApiBody<{ document_id?: number; id?: number }> & { generatedKeys?: Record<string, unknown> }>(res, url);
+  failIfError(body);
+  return { id: body.data?.document_id ?? body.data?.id, generatedKeys: body.generatedKeys };
+}
+
+export async function listRows(host: string, token: string, collection: string, table: string, page = 1, pageSize = 20): Promise<{ rows: Record<string, unknown>[]; total?: number }> {
+  const url = `${stripTrailingSlash(host)}/v1/collections/${encodeURIComponent(collection)}/tables/${encodeURIComponent(table)}?page=${page}&pageSize=${pageSize}`;
+  const res = await safeFetch(url, { headers: { 'Authorization': authHeader(token) } });
+  const body = await readJson<ApiBody<Array<{ document_id?: number; data?: unknown }>> & { pagination?: { totalCount?: number } }>(res, url);
+  failIfError(body);
+  const rows = (body.data ?? []).map(d => {
+    const doc = typeof d.data === 'string' ? JSON.parse(d.data) : (d.data ?? {});
+    return { document_id: d.document_id, ...(doc as Record<string, unknown>) };
+  });
+  return { rows, total: body.pagination?.totalCount };
+}
+
+export async function listCollections(host: string, token: string): Promise<Record<string, unknown>[]> {
+  const url = `${stripTrailingSlash(host)}/v1/collections`;
+  const res = await safeFetch(url, { headers: { 'Authorization': authHeader(token) } });
+  const body = await readJson<ApiBody<unknown>>(res, url);
+  failIfError(body);
+  const d = body.data as unknown;
+  if (Array.isArray(d)) return d as Record<string, unknown>[];
+  const inner = (d as { collections?: unknown })?.collections;
+  return Array.isArray(inner) ? inner as Record<string, unknown>[] : [];
 }
 
 export async function rollback(host: string, token: string, collection: string, targetVersion?: number): Promise<{ collection: string; restored_version: number; table_count: number; message: string }> {
   const bodyObj = targetVersion != null ? { targetVersion } : {};
-  const res = await safeFetch(`${stripTrailingSlash(host)}/v1/schemas/${encodeURIComponent(collection)}/rollback`, {
+  const url = `${stripTrailingSlash(host)}/v1/schemas/${encodeURIComponent(collection)}/rollback`;
+  const res = await safeFetch(url, {
     method: 'POST',
     headers: {
       'Authorization': authHeader(token),
@@ -135,7 +205,7 @@ export async function rollback(host: string, token: string, collection: string, 
     body: JSON.stringify(bodyObj),
   });
 
-  const body = await res.json() as { success: boolean; data?: { collection: string; restored_version: number; table_count: number; message: string }; error?: { code?: string; message?: string } };
-  if (!body.success) handleApiError(body as { success: false; error?: { code?: string; message?: string } });
+  const body = await readJson<ApiBody<{ collection: string; restored_version: number; table_count: number; message: string }>>(res, url);
+  failIfError(body);
   return body.data!;
 }

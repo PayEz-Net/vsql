@@ -1,9 +1,9 @@
-# @vibesql/cli
+# vsql: the VibeSQL command line
 
 A terminal-native interface for [VibeSQL](https://vibesql.online). Query, inspect, and manage VibeSQL databases from the command line.
 
 ```bash
-vibesql query "SELECT * FROM users LIMIT 5"
+vsql query "SELECT * FROM users LIMIT 5"
 ```
 
 Zero runtime dependencies. Node.js 18+. Works on Windows, macOS, and Linux.
@@ -11,42 +11,51 @@ Zero runtime dependencies. Node.js 18+. Works on Windows, macOS, and Linux.
 ## Install
 
 ```bash
-# Global install
-npm install -g @vibesql/cli
+# Global install, straight from GitHub (builds on install)
+npm install -g github:PayEz-Net/vsql
 
-# Or run without installing
-npx @vibesql/cli query "SELECT 1"
+# A specific release
+npm install -g github:PayEz-Net/vsql#v1.3.0
 ```
+
+Not published to npm yet.
 
 ## Quick Start
 
 ```bash
-# 1. Point the CLI at your IDP + server
+# 1. Point the CLI at the IDP and the Vibe API
 export VSQL_IDP_URL=https://idp.payez.net
-export VSQL_CLIENT_ID=your_oauth_client_id
-export VSQL_HOST=https://vibesql.online
+export VSQL_CLIENT_ID=<your tenant>        # your developer tenant, shown in KeelBase
+export VSQL_HOST=https://api.idealvibe.online
 
-# 2. Authenticate (device-code flow)
-vibesql login
-# Go to: https://idp.payez.net/auth/device
-# Enter code: ABCD-1234
-# Approved. Tokens saved.
+# 2. Sign in (device code), then approve the code while signed in
+vsql login
 
-# 3. Run a query
-vibesql query "SELECT * FROM users LIMIT 5"
+# 3. Create a collection (DDL), write a row, read it back
+vsql schema update my_app --file schema.json --yes
+vsql insert my_app notes --data '{"note":"hello"}'
+vsql rows my_app notes
 ```
+
+### Which command writes what
+
+- **`vsql schema update`** creates or changes tables. This is DDL, defined as a JSON schema per collection.
+- **`vsql insert`** writes rows. **`vsql rows`** reads them back.
+- **`vsql query`** is **read-only SQL**. The hosted API refuses DDL and writes on this route until row-level security lands, and the CLI tells you which command to use instead.
+
+The CLI signs in as **you**, which is what DDL needs. A KeelBase client id and secret (from the KeelBase page) are for your **app's** runtime calls. Use the SDK or `@payez/next-mvp` for those, not this CLI.
 
 ## Commands
 
-### `vibesql query <sql>`
+### `vsql query <sql>`
 
 Execute SQL and display results.
 
 ```bash
-vibesql query "SELECT * FROM users LIMIT 5"
-vibesql query "SELECT * FROM users" --format json
-vibesql query --file ./reports/monthly.sql
-vibesql query "SELECT id, name FROM users" | head -5   # pipe-friendly
+vsql query "SELECT * FROM users LIMIT 5"
+vsql query "SELECT * FROM users" --format json
+vsql query --file ./reports/monthly.sql
+vsql query "SELECT id, name FROM users" | head -5   # pipe-friendly
 ```
 
 **Options:**
@@ -55,33 +64,33 @@ vibesql query "SELECT id, name FROM users" | head -5   # pipe-friendly
 - `--host <url>` — Override VibeSQL server URL
 - `--profile <name>` — Use a named auth profile
 
-### `vibesql tables`
+### `vsql tables`
 
 List all tables in a schema.
 
 ```bash
-vibesql tables                        # default: public schema
-vibesql tables --schema vibe_agents   # specific schema
+vsql tables                        # default: public schema
+vsql tables --schema vibe_agents   # specific schema
 ```
 
-### `vibesql describe <table>`
+### `vsql describe <table>`
 
 Show column details — name, type, nullable, default.
 
 ```bash
-vibesql describe users
-vibesql describe agent_profiles --format json
+vsql describe users
+vsql describe agent_profiles --format json
 ```
 
-### `vibesql rollback <collection>`
+### `vsql rollback <collection>`
 
 Roll back a VibeSQL schema collection to a previous version.
 
 ```bash
-vibesql rollback my_collection --list           # show version history
-vibesql rollback my_collection --dry-run        # preview changes without applying
-vibesql rollback my_collection --version 14     # roll back to specific version
-vibesql rollback my_collection --yes            # skip confirmation prompt
+vsql rollback my_collection --list           # show version history
+vsql rollback my_collection --dry-run        # preview changes without applying
+vsql rollback my_collection --version 14     # roll back to specific version
+vsql rollback my_collection --yes            # skip confirmation prompt
 ```
 
 Requires typing the collection name to confirm (unless `--yes` is passed):
@@ -96,16 +105,16 @@ Rolling back "my_collection" to version 14:
 Type the collection name to confirm: my_collection
 ```
 
-### `vibesql login` / `vibesql logout`
+### `vsql login` / `vsql logout`
 
 Authenticate against the IDP. Tokens (access + refresh) are stored per profile and
 refreshed automatically when they expire.
 
 ```bash
-vibesql login                              # device-code flow (default)
-vibesql login --passwordless you@email.com # email passwordless flow
-vibesql login --profile production         # authenticate a named profile
-vibesql logout                             # clear tokens from the profile
+vsql login                              # device-code flow (default)
+vsql login --passwordless you@email.com # email passwordless flow
+vsql login --profile production         # authenticate a named profile
+vsql logout                             # clear tokens from the profile
 ```
 
 Device-code flow prints a code and a URL — approve it in your browser, and the CLI
@@ -113,18 +122,18 @@ saves the resulting Bearer/JWT. Passwordless emails you a 6-digit code.
 
 Requires `VSQL_IDP_URL` and `VSQL_CLIENT_ID` to be set (see [Authentication](#authentication)).
 
-### `vibesql config <set|show|clear>`
+### `vsql config <set|show|clear>`
 
-Manage saved connection profiles. Hosts are set here; **tokens come from `vibesql login`**.
+Manage saved connection profiles. Hosts are set here; **tokens come from `vsql login`**.
 
 ```bash
-vibesql config set host https://vibesql.online  # set the host for a profile
-vibesql config set host http://localhost:52411 --profile local
-vibesql config show                             # display config (tokens masked)
-vibesql config clear                            # wipe all profiles
+vsql config set host https://vibesql.online  # set the host for a profile
+vsql config set host http://localhost:52411 --profile local
+vsql config show                             # display config (tokens masked)
+vsql config clear                            # wipe all profiles
 ```
 
-> `vibesql config init` no longer takes an API key — it just points you to `vibesql login`.
+> `vsql config init` no longer takes an API key — it just points you to `vsql login`.
 
 Config is stored at `~/.vibesql/config.json`:
 
@@ -143,22 +152,22 @@ Config is stored at `~/.vibesql/config.json`:
 }
 ```
 
-### `vibesql health`
+### `vsql health`
 
 Check server connectivity.
 
 ```bash
-vibesql health
+vsql health
 # vibesql.online: healthy (45ms, v2.0.0)
 
-vibesql health --host http://localhost:52411
+vsql health --host http://localhost:52411
 # localhost:52411: healthy (3ms)
 ```
 
-### `vibesql version`
+### `vsql version`
 
 ```bash
-vibesql version
+vsql version
 # vibesql-cli v1.0.0
 ```
 
@@ -210,15 +219,15 @@ When stdout is piped (non-TTY), the default format automatically switches from `
 ## Authentication
 
 The CLI authenticates against the PayEz IDP and uses a Bearer/JWT access token. Log in
-once with `vibesql login`; the CLI stores the access + refresh tokens per profile and
+once with `vsql login`; the CLI stores the access + refresh tokens per profile and
 refreshes them automatically before they expire.
 
 Two login flows are supported:
 
 | Flow | Command | What happens |
 |------|---------|--------------|
-| Device-code (default) | `vibesql login` | Prints a user code + URL; approve in the browser. |
-| Passwordless | `vibesql login --passwordless <email>` | Emails a 6-digit code you enter at the prompt. |
+| Device-code (default) | `vsql login` | Prints a user code + URL; approve in the browser. |
+| Passwordless | `vsql login --passwordless <email>` | Emails a 6-digit code you enter at the prompt. |
 
 **Required environment:**
 
@@ -251,11 +260,11 @@ CLI ──→ Edge Server ──→ VibeSQL Server ──→ PostgreSQL
 Errors print to stderr with a code and hint. Exit code 1.
 
 ```bash
-$ vibesql query "SELCT * FROM users"
+$ vsql query "SELCT * FROM users"
 Error [INVALID_SQL]: You have an error in your SQL syntax
   Hint: Check for typos near "SELCT"
 
-$ vibesql health --host http://unreachable:52411
+$ vsql health --host http://unreachable:52411
 Error [CONNECTION_FAILED]: Could not connect to http://unreachable:52411
   Hint: Check that the VibeSQL server is running and the host is correct
 ```
@@ -266,7 +275,7 @@ Error [CONNECTION_FAILED]: Could not connect to http://unreachable:52411
 - **Runtime:** Node.js 18+
 - **Dependencies:** Zero runtime. Uses built-in `fetch`, `fs`, `path`, `readline`.
 - **Core logic:** ~200 lines across 5 source files
-- **Package:** `@vibesql/cli` on npm
+- **Package:** `vsql`, installed from GitHub (`github:PayEz-Net/vsql`)
 
 ## License
 
