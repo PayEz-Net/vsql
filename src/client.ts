@@ -203,6 +203,37 @@ export async function insertDocument(conn: Conn, collection: string, table: stri
   return { id: typeof id === 'number' ? id : undefined };
 }
 
+/**
+ * Read a table's rows back (rigpert 63609: without this a developer could write rows but never see them - hosted SQL
+ * does not see collection tables). GET /v1/collections/{c}/tables/{t}?page&pageSize; each item is
+ * { document_id, data } with data an object or a JSON string. Read-only, so a KeelBase secret may do it.
+ * From rigpert's PR #2 (rigpert/pay-1738-api-resync), moved onto send() so key-signing covers it.
+ */
+export async function listRows(conn: Conn, collection: string, table: string, page = 1, pageSize = 20): Promise<{ rows: Record<string, unknown>[]; total?: number }> {
+  const path = `/v1/collections/${encodeURIComponent(collection)}/tables/${encodeURIComponent(table)}?page=${page}&pageSize=${pageSize}`;
+  const res = await send(conn, 'rows', 'GET', path);
+  const body = await expectOk(res) as ApiBody & { pagination?: { totalCount?: number } };
+  const items = Array.isArray(body.data) ? body.data as Array<{ document_id?: number; documentId?: number; data?: unknown }> : [];
+  const rows = items.map(d => {
+    let doc: unknown = d.data ?? {};
+    if (typeof doc === 'string') {
+      try { doc = JSON.parse(doc); } catch { doc = { data: doc }; }
+    }
+    return { document_id: d.document_id ?? d.documentId, ...(doc as Record<string, unknown>) };
+  });
+  return { rows, total: body.pagination?.totalCount };
+}
+
+/** The tenant's collections: GET /v1/collections (a bare array, or { collections: [...] }). Read-only. */
+export async function listCollections(conn: Conn): Promise<Record<string, unknown>[]> {
+  const res = await send(conn, 'collections', 'GET', '/v1/collections');
+  const body = await expectOk(res);
+  const d = body.data as unknown;
+  if (Array.isArray(d)) return d as Record<string, unknown>[];
+  const inner = (d as { collections?: unknown } | undefined)?.collections;
+  return Array.isArray(inner) ? inner as Record<string, unknown>[] : [];
+}
+
 export async function rollback(conn: Conn, collection: string, targetVersion?: number): Promise<{ collection: string; restored_version: number; table_count: number; message: string }> {
   const bodyObj = targetVersion != null ? { targetVersion } : {};
   const res = await send(conn, 'rollback', 'POST', `/v1/schemas/${encodeURIComponent(collection)}/rollback`, { body: bodyObj, ddl: true });

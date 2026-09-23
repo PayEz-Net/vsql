@@ -36,6 +36,8 @@ interface Flags {
   'client-id'?: number;
   email?: string;
   passwordless?: string;
+  page?: number;
+  'page-size'?: number;
 }
 
 function parseArgs(argv: string[]): { command: string; positionals: string[]; flags: Flags } {
@@ -51,7 +53,7 @@ function parseArgs(argv: string[]): { command: string; positionals: string[]; fl
         (flags as Record<string, unknown>)[key] = true;
       } else {
         const val = argv[++i];
-        if (key === 'version' || key === 'client-id') {
+        if (key === 'version' || key === 'client-id' || key === 'page' || key === 'page-size') {
           (flags as Record<string, unknown>)[key] = parseInt(val, 10);
         } else {
           (flags as Record<string, unknown>)[key] = val;
@@ -358,6 +360,30 @@ async function run(): Promise<void> {
       break;
     }
 
+    case 'collections': {
+      const conn = await resolveConn(flags);
+      const list = await client.listCollections(conn);
+      if (list.length === 0) { console.log('No collections.'); break; }
+      console.log(formatRows(list, detectFormat(flags.format)));
+      break;
+    }
+
+    case 'rows': {
+      const collection = positional;
+      const table = positionals[1];
+      if (!collection || !table) fatal('MISSING_ARGS', 'Collection and table required.', 'Usage: vsql rows <collection> <table> [--page N] [--page-size N]');
+      const page = flags.page ?? 1;
+      const pageSize = flags['page-size'] ?? 20;
+      if (!Number.isInteger(page) || page < 1 || !Number.isInteger(pageSize) || pageSize < 1) fatal('INVALID_ARGS', '--page and --page-size must be whole numbers, 1 or more.');
+      const conn = await resolveConn(flags);
+      const result = await client.listRows(conn, collection, table, page, pageSize);
+      const format = detectFormat(flags.format);
+      if (result.rows.length === 0) console.log(`No rows in ${collection}.${table}${page > 1 ? ` on page ${page}` : ''}.`);
+      else console.log(formatRows(result.rows, format));
+      if (result.total != null && format === 'table') console.error(`Page ${page}, ${result.rows.length} of ${result.total} rows.`);
+      break;
+    }
+
     case 'rollback': {
       if (!positional) fatal('NO_COLLECTION', 'No collection name provided.', 'Usage: vsql rollback <collection>');
       const conn = await resolveConn(flags);
@@ -460,7 +486,7 @@ async function run(): Promise<void> {
         const result = await client.updateSchema(conn, collection, newSchema);
         console.log(`Schema updated: "${collection}" (${result.table_count ?? getTableNames(newSchema).length} tables).`);
       } else {
-        console.log('Usage: vsql schema <show|update> <collection>');
+        fatal('UNKNOWN_COMMAND', sub ? `Unknown command "schema ${sub}".` : "`vsql schema` needs a subcommand.", 'Usage: vsql schema <show|update> <collection>');
       }
       break;
     }
@@ -537,7 +563,7 @@ async function run(): Promise<void> {
         clearConfig();
         console.log('Config cleared.');
       } else {
-        console.log('Usage: vsql config <init|set|show|clear>');
+        fatal('UNKNOWN_COMMAND', sub ? `Unknown command "config ${sub}".` : "`vsql config` needs a subcommand.", 'Usage: vsql config <init|set|show|clear>');
       }
       break;
     }
@@ -561,7 +587,16 @@ async function run(): Promise<void> {
     case 'help':
     case '--help':
     case '-h':
+      printHelp();
+      break;
+
     default:
+      // An unknown command used to print help and exit 0, so a typo looked like it ran (rigpert 63609).
+      fatal('UNKNOWN_COMMAND', `Unknown command "${command}".`, 'Run `vsql help` for the list of commands.');
+  }
+}
+
+function printHelp(): void {
       console.log(`vsql v${VERSION} — VibeSQL command-line interface
 
 Usage: vsql <command> [options]
@@ -575,6 +610,8 @@ Commands:
   schema show <collection> Dump active JSON schema
   schema update <col>      Push schema from file
   insert <col> <table>     Insert documents
+  rows <col> <table>       Read a table's rows back (--page, --page-size)
+  collections              List your collections
   rollback <collection>    Roll back a schema collection
   config <sub>             Manage connection profiles (init|set|show|clear)
   health                   Check server connectivity
@@ -589,6 +626,8 @@ Options:
   --file <path>         Read SQL/schema/doc from a file
   --data <json>         Inline JSON for insert
   --batch               Insert each element of a JSON array
+  --page <n>            Page of rows to read (rows; default 1)
+  --page-size <n>       Rows per page (rows; default 20)
   --dry-run             Show diff without applying
   --yes                 Skip confirmation prompt
 
@@ -601,8 +640,8 @@ Environment:
   VSQL_DEBUG            Set to 1 to print each request's target to stderr (never a credential)
 
 Key-signing (VIBE_CLIENT_ID + VIBE_HMAC_KEY set): calls go through the identity service
-(VSQL_IDP_URL) signed with your KeelBase secret. It covers query, health, schema show,
-rollback --list and insert. Schema changes (schema update, rollback) use your sign-in:
+(VSQL_IDP_URL) signed with your KeelBase secret. It covers query, health, rows, collections,
+schema show, rollback --list and insert. Schema changes (schema update, rollback) use your sign-in:
 run \`vsql login\` with the two variables unset.
 
 Examples:
@@ -612,9 +651,8 @@ Examples:
   vsql schema show vibe_agents
   vsql schema update vibe_agents --file schema.json
   vsql insert vibe_agents agents --file agent.json
+  vsql rows vibe_agents agents --page-size 5
   vsql rollback my_schema --list`);
-      break;
-  }
 }
 
 run();

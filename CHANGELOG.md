@@ -18,6 +18,7 @@ Re-synced with the hosted VibeSQL API, plus optional key-signing with a KeelBase
 - **Key-signing (optional, for app runtime calls):** set `VIBE_CLIENT_ID` (KeelBase client id) and `VIBE_HMAC_KEY` (KeelBase secret) and calls go through the identity service's proxy, `POST {IdP}/api/vibe/proxy`, HMAC-signed. Covers `query`, `health`, `schema show`, `rollback --list` and `insert`. Schema changes are refused with a secret; they use `vsql login`.
   - The secret is read from the environment only, and is never logged, written to config or passed in argv.
   - Setting only one of the two variables fails loud.
+- **`vsql rows <collection> <table>`** (`--page`, `--page-size`) reads a table's rows back through `GET /v1/collections/{c}/tables/{t}`, and **`vsql collections`** lists your collections. Hosted SQL cannot see collection tables, so before this there was no way to read back what you wrote. Both are read-only and work with a KeelBase secret. Taken from rigpert's PR #2.
 - `VSQL_DEBUG=1` prints each request's target to stderr, never a credential.
 - `config show` names the KeelBase client id when key-signing is configured, and whether the secret is set.
 - Tests (`npm test`):
@@ -26,10 +27,12 @@ Re-synced with the hosted VibeSQL API, plus optional key-signing with a KeelBase
   - key-signing is checked for its proxy request shape, for keeping the secret off the wire and out of debug output, and for refusing DDL.
 
 ### Fixed
+- An unknown command (or `schema`/`config` subcommand) printed help and exited 0, so a typo looked like it ran. It now exits non-zero with `UNKNOWN_COMMAND`.
+- `config show` in key-signing mode said "No config found. Run `vsql login`" under a working key-signing line. It now says a sign-in profile is not needed for key-signing.
 - An empty or non-JSON reply printed a raw `SyntaxError` stack trace; it now reports the HTTP status and the start of the body.
 
 ### Docs
-- **README:** the install line is now true (GitHub, not npm).
+- **README:** install is one line: `npm install -g` of the release tarball (`vsql-1.3.0.tgz`, attached to the GitHub release). It is not on the npm registry.
 - **README:** it says plainly that the device approval screen does not exist yet, and how a code is approved today.
 
 ## 1.2.0 — 2026-05-25

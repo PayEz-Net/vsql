@@ -9,6 +9,11 @@ import { createHmac } from 'node:crypto';
 import * as client from '../dist/client.js';
 import { signProxyRequest, decodeSecret } from '../dist/signing.js';
 import { keyCredentials } from '../dist/config.js';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Scout's TEST key (bytes 0x00..0x1f) and the verifier's own vectors (DotNetPert-Scout 63513, computed by
 // VibeProxyController.ComputeHmacSignature). Never a real secret.
@@ -189,4 +194,65 @@ test('config: key-signing only from the environment pair; half a pair fails loud
   process.env.VIBE_CLIENT_ID = 'not-a-vibe-id';
   await expectExit(async () => keyCredentials(), 'INVALID_CLIENT_ID');
   assert.ok(!stderr.includes(TEST_SECRET), 'no error message echoes the secret');
+});
+
+// ── rows / collections: reading data back (rigpert 63609, first-impressions run on prod) ─────────────────────────────
+test('rows: GET /v1/collections/{c}/tables/{t}?page&pageSize, each row is data[].data (object or JSON string) with its document_id', async () => {
+  reply(200, { success: true, data: [{ document_id: 7, data: { title: 'a' } }, { document_id: 8, data: '{"title":"b"}' }], pagination: { totalCount: 12 } });
+  const r = await client.listRows(BEARER, 'vibe_agents', 'agents', 2, 5);
+  assert.deepEqual(calls.map(c => [c.method, c.url]), [['GET', `${HOST}/v1/collections/vibe_agents/tables/agents?page=2&pageSize=5`]]);
+  assert.equal(calls[0].body, undefined, 'a GET carries no body');
+  assert.deepEqual(r.rows, [{ document_id: 7, title: 'a' }, { document_id: 8, title: 'b' }]);
+  assert.equal(r.total, 12);
+});
+test('rows: defaults to page 1, 20 per page; the API refusal is surfaced with its code', async () => {
+  reply(404, { success: false, error: { code: 'TABLE_NOT_FOUND', message: 'no such table' } });
+  await expectExit(() => client.listRows(BEARER, 'c', 't'), 'TABLE_NOT_FOUND');
+  assert.equal(calls[0].url, `${HOST}/v1/collections/c/tables/t?page=1&pageSize=20`);
+});
+test('collections: GET /v1/collections; a bare array or { collections: [...] } both read', async () => {
+  reply(200, { success: true, data: [{ collection: 'vibe_agents' }] });
+  assert.deepEqual(await client.listCollections(BEARER), [{ collection: 'vibe_agents' }]);
+  reply(200, { success: true, data: { collections: [{ collection: 'x' }] } });
+  assert.deepEqual(await client.listCollections(BEARER), [{ collection: 'x' }]);
+  assert.deepEqual(calls.map(c => [c.method, c.url]), [['GET', `${HOST}/v1/collections`], ['GET', `${HOST}/v1/collections`]]);
+});
+test('key-signing: rows and collections go through the proxy as signed GETs (read-only, allowed with the secret)', async () => {
+  reply(200, { success: true, data: [] });
+  reply(200, { success: true, data: [] });
+  await client.listRows(KEY, 'vibe_agents', 'agents');
+  await client.listCollections(KEY);
+  assert.deepEqual(calls.map(c => [c.url, c.body.method, c.body.endpoint, c.body.data]), [
+    [`${IDP}/api/vibe/proxy`, 'GET', '/v1/collections/vibe_agents/tables/agents?page=1&pageSize=20', null],
+    [`${IDP}/api/vibe/proxy`, 'GET', '/v1/collections', null],
+  ]);
+  const c = calls[1];
+  const expected = createHmac('sha256', Buffer.from(TEST_SECRET, 'base64')).update(`${c.headers['X-Vibe-Timestamp']}|GET|/v1/collections`).digest('base64');
+  assert.equal(c.headers['X-Vibe-Signature'], expected);
+});
+
+// ── the CLI itself, spawned: exit codes and config show (rigpert 63609) ──────────────────────────────────────────────
+function cli(args, extraEnv = {}) {
+  const home = mkdtempSync(join(tmpdir(), 'vsql-home-'));
+  const env = { ...saved.env, HOME: home, USERPROFILE: home, ...extraEnv };
+  for (const k of ['VIBE_CLIENT_ID', 'VIBE_HMAC_KEY', 'VSQL_DEBUG']) if (!(k in extraEnv)) delete env[k];
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/vsql.js', import.meta.url)), ...args], { env, encoding: 'utf8' });
+  rmSync(home, { recursive: true, force: true });
+  return r;
+}
+test('cli: an unknown command exits non-zero and says so (it printed help and exited 0, so a typo looked like it ran)', () => {
+  const r = cli(['rowz']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /unknown command.*rowz/i);
+  assert.equal(cli(['help']).status, 0, 'help itself still exits 0');
+  assert.equal(cli([]).status, 0, 'no command prints help, exit 0');
+});
+test('cli: config show in key-signing mode does not tell the developer to run `vsql login`', () => {
+  const r = cli(['config', 'show'], { VIBE_CLIENT_ID: 'vibe_25c8bbf4cd37c521', VIBE_HMAC_KEY: TEST_SECRET });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /key-signing/);
+  assert.doesNotMatch(r.stdout, /No config found/);
+  assert.match(r.stdout, /not needed for key-signing/);
+  assert.ok(!r.stdout.includes(TEST_SECRET) && !r.stderr.includes(TEST_SECRET), 'the secret is never printed');
+  assert.match(cli(['config', 'show']).stdout, /No config found\. Run `vsql login`/, 'without a key the hint stays');
 });

@@ -104,7 +104,9 @@ export function showConfig(): void {
     console.log(`  auth:         key-signing (KeelBase client id ${keyId ?? '(VIBE_CLIENT_ID unset)'}, secret ${process.env.VIBE_HMAC_KEY ? 'set' : 'NOT set'})`);
   }
   if (Object.keys(config).length === 0) {
-    console.log('No config found. Run `vsql login` to authenticate.');
+    // With key-signing configured, a missing sign-in profile is not a problem to fix (rigpert 63609).
+    if (keyId && process.env.VIBE_HMAC_KEY) console.log('  sign-in:      no sign-in profile (not needed for key-signing; `vsql login` only for schema changes)');
+    else console.log('No config found. Run `vsql login` to authenticate.');
     return;
   }
   for (const [name, profile] of Object.entries(config)) {

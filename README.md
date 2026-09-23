@@ -10,18 +10,14 @@ Zero runtime dependencies. Node.js 18+. Windows, macOS and Linux.
 
 ## Install
 
-`vsql` is not on npm yet: the `@vibesql/cli` name is not published, and the npm package called `vsql` belongs to someone else, so `npm install -g @vibesql/cli` does not work. Install from GitHub:
-
 ```bash
-# From a release (https://github.com/PayEz-Net/vsql/releases): download the source archive, then in its folder
-npm install && npm run build && npm link
-
-# Or from a clone
-git clone https://github.com/PayEz-Net/vsql.git && cd vsql
-npm install && npm run build && npm link
+npm install -g https://github.com/PayEz-Net/vsql/releases/download/v1.3.0/vsql-1.3.0.tgz
+vsql version
 ```
 
-`npm link` puts `vsql` on your PATH.
+That installs the prebuilt release package and puts `vsql` on your PATH. `vsql` is not on the npm registry: `@vibesql/cli` is not published, and the npm package called `vsql` belongs to someone else. A plain `npm install -g github:PayEz-Net/vsql` does not work either, because on npm 11 the build step cannot find TypeScript.
+
+To build from source instead: `git clone https://github.com/PayEz-Net/vsql.git && cd vsql && npm install && npm run build && npm link`.
 
 ## Two ways to authenticate, for two jobs
 
@@ -69,8 +65,11 @@ export VIBE_CLIENT_ID=vibe_...              # KeelBase client id
 export VIBE_HMAC_KEY=...                    # KeelBase secret - keep it in .env, never commit it
 
 vsql health                                  # proves the id + secret: the identity service checks the signature
-vsql query "SELECT 1 AS ok"
+vsql collections                             # your collections
+vsql rows vibe_agents agents                 # read a table's rows back
 ```
+
+Key-signing covers `query`, `health`, `collections`, `rows`, `schema show`, `rollback --list` and `insert`. Schema changes (`schema update`, `rollback`) use your sign-in.
 
 With both variables set, every call goes through the identity service's proxy (`POST {IdP}/api/vibe/proxy`), signed `base64(HMAC-SHA256(base64decode(secret), "{unix seconds}|{METHOD}|{endpoint}"))`. What to know:
 
@@ -114,6 +113,16 @@ vsql insert keelbase_demo notes --file rows.json --batch   # each element of a J
 
 The document is sent as-is; the collection's schema decides the required fields. The tenant comes from your credential. `--client-id` is accepted for old scripts and ignored.
 
+### `vsql rows <collection> <table>` / `vsql collections`
+
+```bash
+vsql collections
+vsql rows keelbase_demo notes                    # page 1, 20 rows
+vsql rows keelbase_demo notes --page 2 --page-size 50 --format json
+```
+
+Use `rows` to read back what you wrote. Hosted SQL (`query`) cannot see collection tables. Each row shows its `document_id` and the document's fields. Both commands are read-only and work with a KeelBase secret.
+
 ### `vsql rollback <collection>`
 
 ```bash
@@ -124,7 +133,9 @@ vsql rollback keelbase_demo --version 3      # sign-in only
 
 ### `vsql login` / `vsql logout` / `vsql config <set|show|clear>` / `vsql health` / `vsql version`
 
-`config show` masks tokens and, when key-signing is configured, names the KeelBase client id and says whether the secret is set. It never prints the secret.
+`config show` masks tokens. When key-signing is configured, it names the KeelBase client id and says whether the secret is set. It never prints the secret. With key-signing and no sign-in profile, it says the profile is not needed.
+
+An unknown command exits non-zero (`UNKNOWN_COMMAND`) rather than printing help and exiting 0.
 
 ## Errors
 
