@@ -121,7 +121,7 @@ vsql rows keelbase_demo notes                    # page 1, 20 rows
 vsql rows keelbase_demo notes --page 2 --page-size 50 --format json
 ```
 
-Use `rows` to read back what you wrote. Hosted SQL (`query`) cannot see collection tables. Each row shows its `document_id` and the document's fields. Both commands are read-only and work with a KeelBase secret.
+Use `rows` to read back what you wrote. Hosted SQL (`query`) cannot see collection tables. Each row shows its `document_id` and the document's fields. `collections` lists collections that have documents; a collection with a schema but no documents yet does not appear, so check it with `vsql schema show <collection>`. An unknown option fails with `UNKNOWN_FLAG` rather than being ignored. Both commands are read-only and work with a KeelBase secret.
 
 ### `vsql rollback <collection>`
 

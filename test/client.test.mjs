@@ -256,3 +256,13 @@ test('cli: config show in key-signing mode does not tell the developer to run `v
   assert.ok(!r.stdout.includes(TEST_SECRET) && !r.stderr.includes(TEST_SECRET), 'the secret is never printed');
   assert.match(cli(['config', 'show']).stdout, /No config found\. Run `vsql login`/, 'without a key the hint stays');
 });
+test('cli: an unknown flag fails loud (rigpert 63618: `rows --limit 3` silently ate --limit and its value)', () => {
+  const r = cli(['rows', 'c', 't', '--limit', '3']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /UNKNOWN_FLAG.*--limit/);
+  assert.match(r.stderr, /--page-size/, 'the hint names the flag they probably meant');
+  assert.equal(calls.length, 0);
+  assert.equal(cli(['query', '--help']).status, 0, '--help after a command still shows help');
+  const ok = cli(['version', '--profile', 'x']);
+  assert.equal(ok.status, 0, 'a known flag still works');
+});

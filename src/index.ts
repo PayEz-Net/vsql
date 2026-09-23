@@ -40,6 +40,9 @@ interface Flags {
   'page-size'?: number;
 }
 
+const BOOLEAN_FLAGS = ['dry-run', 'list', 'yes', 'batch'];
+const VALUE_FLAGS = ['host', 'profile', 'format', 'file', 'data', 'schema', 'version', 'client-id', 'email', 'passwordless', 'page', 'page-size'];
+
 function parseArgs(argv: string[]): { command: string; positionals: string[]; flags: Flags } {
   const command = argv[0] ?? 'help';
   const flags: Flags = {};
@@ -49,7 +52,12 @@ function parseArgs(argv: string[]): { command: string; positionals: string[]; fl
     const arg = argv[i];
     if (arg.startsWith('--')) {
       const key = arg.slice(2);
-      if (key === 'dry-run' || key === 'list' || key === 'yes' || key === 'batch') {
+      if (key === 'help') return { command: 'help', positionals: [], flags: {} };
+      // An unknown flag used to be taken silently, with the next word as its value (rigpert 63618: `rows --limit 3`).
+      if (!BOOLEAN_FLAGS.includes(key) && !VALUE_FLAGS.includes(key)) {
+        fatal('UNKNOWN_FLAG', `Unknown option "--${key}".`, key === 'limit' ? 'Use --page-size <n> (and --page <n>) with `vsql rows`.' : 'Run `vsql help` for the list of options.');
+      }
+      if (BOOLEAN_FLAGS.includes(key)) {
         (flags as Record<string, unknown>)[key] = true;
       } else {
         const val = argv[++i];
@@ -611,7 +619,7 @@ Commands:
   schema update <col>      Push schema from file
   insert <col> <table>     Insert documents
   rows <col> <table>       Read a table's rows back (--page, --page-size)
-  collections              List your collections
+  collections              List your collections (those with documents)
   rollback <collection>    Roll back a schema collection
   config <sub>             Manage connection profiles (init|set|show|clear)
   health                   Check server connectivity

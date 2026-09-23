@@ -28,6 +28,7 @@ Re-synced with the hosted VibeSQL API, plus optional key-signing with a KeelBase
 
 ### Fixed
 - An unknown command (or `schema`/`config` subcommand) printed help and exited 0, so a typo looked like it ran. It now exits non-zero with `UNKNOWN_COMMAND`.
+- An unknown option was taken silently, with the next word as its value, so `rows --limit 3` looked like it worked. It now fails with `UNKNOWN_FLAG`.
 - `config show` in key-signing mode said "No config found. Run `vsql login`" under a working key-signing line. It now says a sign-in profile is not needed for key-signing.
 - An empty or non-JSON reply printed a raw `SyntaxError` stack trace; it now reports the HTTP status and the start of the body.
 
