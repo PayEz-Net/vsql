@@ -97,8 +97,16 @@ export function clearConfig(): void {
 
 export function showConfig(): void {
   const config = readConfig();
+  // Key-signing lives in the environment, never in the file; say which is active, never the secret.
+  const keyId = process.env.VIBE_CLIENT_ID?.trim();
+  if (keyId || process.env.VIBE_HMAC_KEY) {
+    console.log('[environment]');
+    console.log(`  auth:         key-signing (KeelBase client id ${keyId ?? '(VIBE_CLIENT_ID unset)'}, secret ${process.env.VIBE_HMAC_KEY ? 'set' : 'NOT set'})`);
+  }
   if (Object.keys(config).length === 0) {
-    console.log('No config found. Run `vsql login` to authenticate.');
+    // With key-signing configured, a missing sign-in profile is not a problem to fix (rigpert 63609).
+    if (keyId && process.env.VIBE_HMAC_KEY) console.log('  sign-in:      no sign-in profile (not needed for key-signing; `vsql login` only for schema changes)');
+    else console.log('No config found. Run `vsql login` to authenticate.');
     return;
   }
   for (const [name, profile] of Object.entries(config)) {
@@ -219,6 +227,63 @@ export async function resolveAuth(flags: { host?: string; profile?: string }): P
   }
 
   return { host, token };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Connections (v1.3.0): one type the client takes, whatever the auth.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * How a command reaches VibeSQL.
+ *  - bearer: a VibeSQL Server host directly, with the access token from `vsql login` (unchanged from v1.2.0).
+ *  - anon:   a VibeSQL Server host with no credentials (health only).
+ *  - key:    the hosted VibeSQL through the identity service's proxy, POST {IdP}/api/vibe/proxy, signed with the
+ *            KeelBase client id + KeelBase secret (PAY-1738). Never reaches a VibeSQL host directly.
+ */
+export type Conn =
+  | { kind: 'bearer'; host: string; token: string }
+  | { kind: 'anon'; host: string }
+  | { kind: 'key'; idp: string; clientId: string; secret: string };
+
+/**
+ * Key-signing credentials, from the ENVIRONMENT ONLY: VIBE_CLIENT_ID + VIBE_HMAC_KEY (the names the SDK uses, so one
+ * .env serves both). Never from argv (shell history, process lists) and never written to ~/.vsql/config.json.
+ * Returns null when neither is set (use login mode). Half a pair fails loud rather than silently using login mode.
+ */
+export function keyCredentials(): { idp: string; clientId: string; secret: string } | null {
+  const id = process.env.VIBE_CLIENT_ID?.trim();
+  const secret = process.env.VIBE_HMAC_KEY?.trim();
+  if (!id && !secret) return null;
+  if (!id || !secret) {
+    fatal('INCOMPLETE_KEY', `${id ? 'VIBE_HMAC_KEY' : 'VIBE_CLIENT_ID'} is not set.`,
+      'Key-signing needs BOTH VIBE_CLIENT_ID (your KeelBase client id, vibe_...) and VIBE_HMAC_KEY (your KeelBase secret).');
+  }
+  if (!/^vibe_[0-9a-f]{16}$/i.test(id)) {
+    fatal('INVALID_CLIENT_ID', 'VIBE_CLIENT_ID is not a KeelBase client id.', 'It looks like vibe_ followed by 16 hex characters; copy it from the KeelBase page.');
+  }
+  const idp = (process.env.VSQL_IDP_URL ?? process.env.IDP_URL)?.trim();
+  if (!idp) {
+    fatal('NO_IDP_URL', 'Missing VSQL_IDP_URL (or IDP_URL).', 'Key-signing calls go through the identity service, e.g. VSQL_IDP_URL=https://idp.payez.net');
+  }
+  return { idp: idp.replace(/\/$/, ''), clientId: id, secret };
+}
+
+/** The connection for an authenticated command: key-signing when VIBE_CLIENT_ID + VIBE_HMAC_KEY are set, else login. */
+export async function resolveConn(flags: { host?: string; profile?: string }): Promise<Conn> {
+  const key = keyCredentials();
+  if (key) {
+    if (flags.host) fatal('HOST_WITH_KEY', '--host does not apply with a KeelBase secret.', 'Key-signed calls go through the identity service (VSQL_IDP_URL). Unset VIBE_CLIENT_ID / VIBE_HMAC_KEY to use --host with `vsql login`.');
+    return { kind: 'key', ...key };
+  }
+  const { host, token } = await resolveAuth(flags);
+  return { kind: 'bearer', host, token };
+}
+
+/** The connection for `health`: key-signing when configured (it checks the hosted service), else the host, keyless. */
+export function resolveHealthConn(flags: { host?: string; profile?: string }): Conn {
+  const key = keyCredentials();
+  if (key && !flags.host) return { kind: 'key', ...key };
+  return { kind: 'anon', host: resolveHost(flags) };
 }
 
 /** Resolve just the host (for keyless calls like health). Fails loud if unset. */
