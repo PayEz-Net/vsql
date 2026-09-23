@@ -11,14 +11,13 @@ Zero runtime dependencies. Node.js 18+. Works on Windows, macOS, and Linux.
 ## Install
 
 ```bash
-# Global install, straight from GitHub (builds on install)
-npm install -g github:PayEz-Net/vsql
+# From the GitHub release (prebuilt; needs Node.js 18+)
+npm install -g https://github.com/PayEz-Net/vsql/releases/download/v1.3.0/vsql-1.3.0.tgz
 
-# A specific release
-npm install -g github:PayEz-Net/vsql#v1.3.0
+vsql version
 ```
 
-Not published to npm yet.
+Not published to npm yet. To build from source: clone, `npm install`, `npm run build`, `npm install -g .`
 
 ## Quick Start
 
@@ -275,7 +274,7 @@ Error [CONNECTION_FAILED]: Could not connect to http://unreachable:52411
 - **Runtime:** Node.js 18+
 - **Dependencies:** Zero runtime. Uses built-in `fetch`, `fs`, `path`, `readline`.
 - **Core logic:** ~200 lines across 5 source files
-- **Package:** `vsql`, installed from GitHub (`github:PayEz-Net/vsql`)
+- **Package:** `vsql`, installed from the GitHub release tarball
 
 ## License
 

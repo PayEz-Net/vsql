@@ -15,8 +15,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build",
-    "prepare": "tsc"
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "vibesql",

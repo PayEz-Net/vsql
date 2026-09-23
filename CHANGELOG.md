@@ -15,10 +15,10 @@ Re-synced with the current Vibe API. Tested end to end against dev-93 as a devel
 ### Added
 - **`vsql rows <collection> <table>`**: list documents (`--limit`, `--page`, `--format`).
 - **`vsql collections`**: list your collections with document counts.
-- A `prepare` script, so `npm install -g github:PayEz-Net/vsql` builds on install.
+- Installable from the GitHub release tarball (`npm install -g <release .tgz URL>`); a plain `github:` install is not supported because it skips the TypeScript build.
 
 ### Docs
-- The README uses the real command name (`vsql`), the GitHub install and the read-only query rule.
+- The README uses the real command name (`vsql`), the release-tarball install and the read-only query rule.
 
 
 ## 1.2.0 — 2026-05-25
