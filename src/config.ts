@@ -42,9 +42,18 @@ export interface ClientIdResolution {
   conflict: boolean;
   /** True when neither name is set. */
   missing: boolean;
+  /**
+   * True when the resolved value is a KeelBase CLIENT id (`vibe_...`), not a Tenant (NightHawk 64681
+   * SHOULD). The new name invites pasting the `vibe_` signing credential where the Tenant belongs; the
+   * Tenant is a name (slug or email), never `vibe_`. Refused, not sent.
+   */
+  keelbaseClientIdMistake: boolean;
 }
 
 const nonEmpty = (v: string | undefined): string => (v ?? '').trim();
+
+/** The KeelBase client id shape (the `vibe_` signing credential) - NEVER a Tenant. */
+export const KEELBASE_CLIENT_ID_SHAPE = /^vibe_[A-Za-z0-9]{4,64}$/;
 
 /** Pure: resolve the client id from the two env names. Never reads process.env itself, so it is testable. */
 export function resolveClientId(env: Record<string, string | undefined>): ClientIdResolution {
@@ -52,11 +61,14 @@ export function resolveClientId(env: Record<string, string | undefined>): Client
   const legacy = nonEmpty(env.VSQL_CLIENT_ID);
 
   if (keelbase && legacy && keelbase !== legacy) {
-    return { deprecated: false, conflict: true, missing: false };
+    return { deprecated: false, conflict: true, missing: false, keelbaseClientIdMistake: false };
   }
-  if (keelbase) return { clientId: keelbase, deprecated: false, conflict: false, missing: false };
-  if (legacy) return { clientId: legacy, deprecated: true, conflict: false, missing: false };
-  return { deprecated: false, conflict: false, missing: true };
+  const value = keelbase || legacy;
+  if (!value) return { deprecated: false, conflict: false, missing: true, keelbaseClientIdMistake: false };
+  if (KEELBASE_CLIENT_ID_SHAPE.test(value)) {
+    return { deprecated: false, conflict: false, missing: false, keelbaseClientIdMistake: true };
+  }
+  return { clientId: value, deprecated: !keelbase, conflict: false, missing: false, keelbaseClientIdMistake: false };
 }
 
 // Emit the deprecation warning at most ONCE per process, however many times clientId() is called.
@@ -93,6 +105,13 @@ export function clientId(): string {
       'NO_CLIENT_ID',
       'Missing KEELBASE_CLIENT_ID environment variable.',
       'Set KEELBASE_CLIENT_ID to your Tenant (the name your KeelBase page shows as "Tenant").',
+    );
+  }
+  if (r.keelbaseClientIdMistake) {
+    fatal(
+      'CLIENT_ID_IS_KEELBASE_CLIENT_ID',
+      'KEELBASE_CLIENT_ID looks like a KeelBase client id (vibe_...), which is a signing credential, not a Tenant.',
+      'Use your Tenant - the name your KeelBase page shows as "Tenant" (a slug or your email), not the vibe_ id.',
     );
   }
   if (r.deprecated && !warnedLegacyClientId) {

@@ -18,17 +18,17 @@ import { resolveClientId } from '../dist/config.js';
 // resolveClientId is PURE (takes the env), so the five cases are asserted directly, no process.env needed.
 test('PAY-1814: KEELBASE_CLIENT_ID only -> used, no deprecation', () => {
   const r = resolveClientId({ KEELBASE_CLIENT_ID: 'acme_dev' });
-  assert.deepEqual(r, { clientId: 'acme_dev', deprecated: false, conflict: false, missing: false });
+  assert.deepEqual(r, { clientId: 'acme_dev', deprecated: false, conflict: false, missing: false, keelbaseClientIdMistake: false });
 });
 
 test('PAY-1814: VSQL_CLIENT_ID only -> used AS DEPRECATED', () => {
   const r = resolveClientId({ VSQL_CLIENT_ID: 'acme_dev' });
-  assert.deepEqual(r, { clientId: 'acme_dev', deprecated: true, conflict: false, missing: false });
+  assert.deepEqual(r, { clientId: 'acme_dev', deprecated: true, conflict: false, missing: false, keelbaseClientIdMistake: false });
 });
 
 test('PAY-1814: both set to the SAME value -> used, not a conflict, not deprecated', () => {
   const r = resolveClientId({ KEELBASE_CLIENT_ID: 'acme_dev', VSQL_CLIENT_ID: 'acme_dev' });
-  assert.deepEqual(r, { clientId: 'acme_dev', deprecated: false, conflict: false, missing: false });
+  assert.deepEqual(r, { clientId: 'acme_dev', deprecated: false, conflict: false, missing: false, keelbaseClientIdMistake: false });
 });
 
 test('PAY-1814: both set to DIFFERENT values -> CONFLICT (refuse, never guess)', () => {
@@ -39,9 +39,22 @@ test('PAY-1814: both set to DIFFERENT values -> CONFLICT (refuse, never guess)',
 
 test('PAY-1814: neither set -> missing (fail loud, as before)', () => {
   const r = resolveClientId({});
-  assert.deepEqual(r, { deprecated: false, conflict: false, missing: true });
+  assert.deepEqual(r, { deprecated: false, conflict: false, missing: true, keelbaseClientIdMistake: false });
   // Blank/whitespace counts as unset - an empty export must not be treated as a value.
   assert.strictEqual(resolveClientId({ KEELBASE_CLIENT_ID: '   ' }).missing, true);
+});
+
+// ── NightHawk 64681 SHOULD: a `vibe_` KeelBase CLIENT id in KEELBASE_CLIENT_ID is REFUSED ──
+test('PAY-1814 SHOULD: a vibe_ KeelBase client id in KEELBASE_CLIENT_ID is the WRONG value (refuse)', () => {
+  const r = resolveClientId({ KEELBASE_CLIENT_ID: 'vibe_25c8bbf4cd37c521' });
+  assert.strictEqual(r.keelbaseClientIdMistake, true, 'a vibe_ value is flagged');
+  assert.strictEqual(r.clientId, undefined, 'and is not returned as a usable client id');
+  // The SAME guard applies when the mistake arrives via the legacy name.
+  assert.strictEqual(resolveClientId({ VSQL_CLIENT_ID: 'vibe_25c8bbf4cd37c521' }).keelbaseClientIdMistake, true);
+  // A Tenant that merely CONTAINS 'vibe' is fine - the guard is the exact vibe_ + hex shape.
+  assert.strictEqual(resolveClientId({ KEELBASE_CLIENT_ID: 'vibeforge_team' }).keelbaseClientIdMistake, false);
+  // An email-shaped Tenant (the WO #256 form) is fine.
+  assert.strictEqual(resolveClientId({ KEELBASE_CLIENT_ID: 'dev@example.test' }).keelbaseClientIdMistake, false);
 });
 
 // ── the WARNING-ONCE and the exit codes, through the shipped clientId() ──
@@ -92,4 +105,11 @@ test('PAY-1814 clientId(): neither set -> fatal NO_CLIENT_ID (fails loud, as bef
   assert.throws(() => clientId(), (e) => e instanceof Exit && e.code === 1);
   assert.match(stderr, /NO_CLIENT_ID/);
   assert.match(stderr, /KEELBASE_CLIENT_ID/, 'the message names KEELBASE_CLIENT_ID, not the old name');
+});
+
+test('PAY-1814 clientId(): a vibe_ value -> fatal CLIENT_ID_IS_KEELBASE_CLIENT_ID (the SHOULD guard)', () => {
+  process.env.KEELBASE_CLIENT_ID = 'vibe_25c8bbf4cd37c521';
+  assert.throws(() => clientId(), (e) => e instanceof Exit && e.code === 1);
+  assert.match(stderr, /CLIENT_ID_IS_KEELBASE_CLIENT_ID/);
+  assert.match(stderr, /Tenant/, 'the hint points at the Tenant, not the vibe_ id');
 });
