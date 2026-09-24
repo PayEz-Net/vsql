@@ -18,8 +18,21 @@ import {
 } from './config.js';
 import { formatRows, detectFormat, type Format } from './format.js';
 import { fatal } from './errors.js';
+import { createRequire } from 'node:module';
 
-const VERSION = '1.3.0';
+/**
+ * PAY-1814: read the version from package.json, do NOT hardcode it. The 1.4.0 pack shipped
+ * `const VERSION = '1.3.0'` while package.json said 1.4.0, so `vsql version` reported 1.3.0 - a
+ * provenance gap where the only thing a tester can ask the binary (what are you?) answered wrong.
+ * package.json is one directory above dist/, and it is included in the npm pack.
+ */
+const VERSION: string = (() => {
+  try {
+    return (createRequire(import.meta.url)('../package.json') as { version?: string }).version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 interface Flags {
   host?: string;
