@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **`KEELBASE_CLIENT_ID` replaces `VSQL_CLIENT_ID` as the client the CLI signs in on** (PAY-1814). Its value is your **Tenant** — the name your KeelBase page shows as "Tenant" — not your KeelBase client id (the `vibe_...` signing credential). `VSQL_CLIENT_ID` is still read as a **deprecated fallback**, with one warning, so existing `.env` files keep working. If both are set to **different** values the CLI refuses rather than guess; if neither is set it fails loud, as before.
+
 ## 1.3.0 — 2026-09-23
 
 Re-synced with the hosted VibeSQL API, plus optional key-signing with a KeelBase secret. The routes were read from the API's source and measured on dev-93.
