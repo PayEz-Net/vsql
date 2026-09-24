@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 — 2026-09-24
 
 ### Changed
 - **`KEELBASE_CLIENT_ID` replaces `VSQL_CLIENT_ID` as the client the CLI signs in on** (PAY-1814). Its value is your **Tenant** — the name your KeelBase page shows as "Tenant" — not your KeelBase client id (the `vibe_...` signing credential). `VSQL_CLIENT_ID` is still read as a **deprecated fallback**, with one warning, so existing `.env` files keep working. If both are set to **different** values the CLI refuses rather than guess; if neither is set it fails loud, as before.
+- A value shaped like a KeelBase client id (`vibe_...`) in `KEELBASE_CLIENT_ID` is **refused** at startup (`CLIENT_ID_IS_KEELBASE_CLIENT_ID`): the Tenant is a name (a slug or your email), never the `vibe_` signing credential.
 
 ## 1.3.0 — 2026-09-23
 
