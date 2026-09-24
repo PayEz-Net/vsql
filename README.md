@@ -31,9 +31,9 @@ Schema changes (`schema update`, `rollback`) always use your sign-in: with a Kee
 ## Quick start: sign in (primary)
 
 ```bash
-export VSQL_IDP_URL=https://idp.payez.net   # the identity service
-export VSQL_CLIENT_ID=<your IdP client id>  # the client you sign in on
-export VSQL_HOST=<the VibeSQL API URL>      # the hosted VibeSQL API
+export VSQL_IDP_URL=https://idp.payez.net       # the identity service
+export KEELBASE_CLIENT_ID=<your Tenant>          # your Tenant, as shown on your KeelBase page
+export VSQL_HOST=<the VibeSQL API URL>           # the hosted VibeSQL API
 
 vsql login                                   # device code (default)
 vsql query "SELECT 1 AS ok"

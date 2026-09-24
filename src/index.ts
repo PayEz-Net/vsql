@@ -642,7 +642,8 @@ Options:
 Environment:
   VSQL_HOST             Default server URL
   VSQL_IDP_URL          IDP base URL (required for login/refresh)
-  VSQL_CLIENT_ID        IDP OAuth client id (required for login/refresh)
+  KEELBASE_CLIENT_ID    Your Tenant (the name your KeelBase page shows as "Tenant"); required for login/refresh
+  VSQL_CLIENT_ID        Deprecated alias for KEELBASE_CLIENT_ID; still read, with a warning
   VIBE_CLIENT_ID        KeelBase client id (vibe_...) - key-signing, for app runtime calls
   VIBE_HMAC_KEY         KeelBase secret (base64) - key-signing; never pass it as an argument
   VSQL_DEBUG            Set to 1 to print each request's target to stderr (never a credential)
