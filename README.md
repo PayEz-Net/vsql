@@ -24,7 +24,7 @@ To build from source instead: `git clone https://github.com/PayEz-Net/vsql.git &
 | For | Use | Covers |
 |-----|-----|--------|
 | **You, at the terminal: schemas, DDL, admin, ad-hoc queries** | Your **sign-in** (`vsql login`, device code). The primary path. | every command |
-| **An app's runtime calls** (a test app, a script, a service) | Your **KeelBase client id + KeelBase secret** from the KeelBase page | `query`, `health`, `schema show`, `rollback --list`, `insert` |
+| **An app's runtime calls** (a test app, a script, a service) | Your **KeelBase client id + KeelBase secret** from the KeelBase page | `query`, `health`, `schema show`, `rollback --list`, `insert`, `update`, `replace`, `delete` |
 
 Schema changes (`schema update`, `rollback`) always use your sign-in: with a KeelBase secret set they are refused and point you at `vsql login`.
 
@@ -69,7 +69,7 @@ vsql collections                             # your collections
 vsql rows vibe_agents agents                 # read a table's rows back
 ```
 
-Key-signing covers `query`, `health`, `collections`, `rows`, `schema show`, `rollback --list` and `insert`. Schema changes (`schema update`, `rollback`) use your sign-in.
+Key-signing covers `query`, `health`, `collections`, `rows`, `schema show`, `rollback --list`, `insert`, `update`, `replace` and `delete`. Schema changes (`schema update`, `rollback`) use your sign-in.
 
 With both variables set, every call goes through the identity service's proxy (`POST {IdP}/api/vibe/proxy`), signed `base64(HMAC-SHA256(base64decode(secret), "{unix seconds}|{METHOD}|{endpoint}"))`. What to know:
 
@@ -112,6 +112,17 @@ vsql insert keelbase_demo notes --file rows.json --batch   # each element of a J
 ```
 
 The document is sent as-is; the collection's schema decides the required fields. The tenant comes from your credential. `--client-id` is accepted for old scripts and ignored.
+
+### `vsql update|replace|delete <collection> <table> <id>`
+
+```bash
+vsql update keelbase_demo notes 41 --data '{"title":"updated"}'   # PATCH: merges into the row
+vsql replace keelbase_demo notes 41 --data '{"title":"new"}'      # PUT: whole-document replace
+vsql delete keelbase_demo notes 41                                # prompts for confirmation
+vsql delete keelbase_demo notes 41 --yes                          # skip the prompt (scripts)
+```
+
+`update` merges the given fields into the row; `replace` overwrites the whole document. `--data` must be a JSON object — invalid JSON, or a non-object (an array, a bare string), fails locally with `INVALID_JSON` before anything is sent. `delete` prompts for confirmation on a terminal; `--yes` skips it; run non-interactively (piped, in a script, CI) without `--yes` and it refuses rather than deleting or hanging on a prompt nothing can answer. `data update|replace|delete` are aliases of these three, matching the older vsql-cli 1.1.1 spelling. All three work with a KeelBase secret, the same as `insert`.
 
 ### `vsql rows <collection> <table>` / `vsql collections`
 

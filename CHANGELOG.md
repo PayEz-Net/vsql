@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.1 — 2026-09-29
+
+PAY-1975 (Vasanth's hackathon, Jon, today): v1.3.0 had `insert` but no way to update or delete a
+row. The server always supported it (measured on the dev-93 twin: `PATCH .../{id}` → 200,
+`DELETE .../{id}` → 204, read-back confirms both); the CLI just never carried the commands
+forward from the old ADO vsql-cli 1.1.1.
+
+### Added
+- **`vsql update <collection> <table> <id> --data '{...}'`** — merge-update a document, `PATCH /v1/collections/{c}/tables/{t}/{id}`.
+- **`vsql replace <collection> <table> <id> --data '{...}'`** — whole-document replace, `PUT` on the same path.
+- **`vsql delete <collection> <table> <id>`** — delete a document, `DELETE` on the same path. Prompts for confirmation on a TTY; `--yes` skips the prompt; a non-TTY call without `--yes` refuses outright rather than deleting silently or hanging on a prompt nothing can answer.
+- `data update|replace|delete` are kept as aliases of the three commands above, matching the 1.1.1 spelling, so existing docs/scripts using it still work.
+- All three are covered by key-signing (a KeelBase secret), the same as `insert` — row writes are app runtime, not a schema change.
+- `--data` is validated locally before any request is sent: invalid JSON, or JSON that isn't a plain object, fails with `INVALID_JSON` rather than reaching the server half-parsed.
+
 ## 1.3.0 — 2026-09-23
 
 Re-synced with the hosted VibeSQL API, plus optional key-signing with a KeelBase secret. The routes were read from the API's source and measured on dev-93.

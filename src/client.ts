@@ -203,6 +203,43 @@ export async function insertDocument(conn: Conn, collection: string, table: stri
   return { id: typeof id === 'number' ? id : undefined };
 }
 
+/** The row path a single document lives at: /v1/collections/{c}/tables/{t}/{id}, every segment encoded. */
+function documentPath(collection: string, table: string, id: string | number): string {
+  return `/v1/collections/${encodeURIComponent(collection)}/tables/${encodeURIComponent(table)}/${encodeURIComponent(String(id))}`;
+}
+
+/**
+ * PAY-1975: merge-update a document. PATCH /v1/collections/{c}/tables/{t}/{id}, measured 200 on the dev-93 twin
+ * (rigpert 67270, client 45). Row writes are app runtime, so a KeelBase secret may do this, same as insert.
+ */
+export async function updateDocument(conn: Conn, collection: string, table: string, id: string | number, patch: Record<string, unknown>): Promise<void> {
+  const res = await send(conn, 'update', 'PATCH', documentPath(collection, table, id), { body: patch });
+  await expectOk(res);
+}
+
+/**
+ * PAY-1975: whole-document replace. PUT /v1/collections/{c}/tables/{t}/{id}. Same auth/idempotency posture as update:
+ * a KeelBase secret may call it, and calling it twice with the same body leaves the row in the same state.
+ */
+export async function replaceDocument(conn: Conn, collection: string, table: string, id: string | number, doc: Record<string, unknown>): Promise<void> {
+  const res = await send(conn, 'replace', 'PUT', documentPath(collection, table, id), { body: doc });
+  await expectOk(res);
+}
+
+/**
+ * PAY-1975: delete a document. DELETE /v1/collections/{c}/tables/{t}/{id}, measured 204 on the dev-93 twin
+ * (rigpert 67270) with the read-back then 404. The CLI layer (index.ts) is where the confirmation prompt /
+ * --yes / non-TTY refusal lives — this function does the call only, once the caller has decided to make it.
+ */
+export async function deleteDocument(conn: Conn, collection: string, table: string, id: string | number): Promise<void> {
+  const res = await send(conn, 'delete', 'DELETE', documentPath(collection, table, id));
+  // A DELETE reply can be a 204 with no body at all - readJson/expectOk already handle an empty body as long as the
+  // status is 2xx, but expectOk calls readJson which fatal()s on a non-JSON body. 204 has no body to parse, so
+  // handle it directly rather than forcing an empty response through the JSON path.
+  if (res.status === 204) return;
+  await expectOk(res);
+}
+
 /**
  * Read a table's rows back (rigpert 63609: without this a developer could write rows but never see them - hosted SQL
  * does not see collection tables). GET /v1/collections/{c}/tables/{t}?page&pageSize; each item is

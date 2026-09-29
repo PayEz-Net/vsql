@@ -32,6 +32,12 @@ function reply(status, body, statusText = '') {
   replies.push(() => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, statusText }));
 }
 
+/** Queue a reply with NO body - for null-body statuses (204/205/304), where the Fetch spec forbids any body,
+ *  even an empty string (`new Response('', {status:204})` throws). */
+function replyEmpty(status) {
+  replies.push(() => new Response(null, { status }));
+}
+
 beforeEach(() => {
   calls = []; replies = []; stderr = '';
   saved = { fetch: globalThis.fetch, exit: process.exit, write: process.stderr.write, env: { ...process.env } };
@@ -231,6 +237,49 @@ test('key-signing: rows and collections go through the proxy as signed GETs (rea
   assert.equal(c.headers['X-Vibe-Signature'], expected);
 });
 
+// ── PAY-1975: update / replace / delete a row (measured on the dev-93 twin, rigpert 67270) ────────────────────────────
+test('update: PATCH /v1/collections/{c}/tables/{t}/{id} with the patch as the body, path segments encoded', async () => {
+  reply(200, { success: true, data: { document_id: 41 } });
+  await client.updateDocument(BEARER, 'keelbase demo', 'notes', 41, { city: 'Chennai' });
+  assert.deepEqual(calls.map(c => [c.method, c.url]), [['PATCH', `${HOST}/v1/collections/keelbase%20demo/tables/notes/41`]]);
+  assert.deepEqual(calls[0].body, { city: 'Chennai' });
+  assert.equal(calls[0].headers.Authorization, `Bearer ${JWT}`);
+});
+test('replace: PUT /v1/collections/{c}/tables/{t}/{id} with the whole document as the body', async () => {
+  reply(200, { success: true, data: { document_id: 41 } });
+  await client.replaceDocument(BEARER, 'keelbase_demo', 'notes', 41, { title: 'new', city: 'Chennai' });
+  assert.deepEqual(calls.map(c => [c.method, c.url]), [['PUT', `${HOST}/v1/collections/keelbase_demo/tables/notes/41`]]);
+  assert.deepEqual(calls[0].body, { title: 'new', city: 'Chennai' });
+});
+test('delete: DELETE /v1/collections/{c}/tables/{t}/{id}, a 204 with no body does not throw (readJson would fatal() on an unparseable empty body)', async () => {
+  replyEmpty(204);
+  await client.deleteDocument(BEARER, 'keelbase_demo', 'notes', 41);
+  assert.deepEqual(calls.map(c => [c.method, c.url]), [['DELETE', `${HOST}/v1/collections/keelbase_demo/tables/notes/41`]]);
+  assert.equal(calls[0].body, undefined, 'DELETE carries no body');
+});
+test('delete: a non-204 failure (404 NOT_FOUND) still surfaces the API error, not swallowed as success', async () => {
+  reply(404, { success: false, error: { code: 'NOT_FOUND', message: 'no such row' } });
+  await expectExit(() => client.deleteDocument(BEARER, 'keelbase_demo', 'notes', 999), 'NOT_FOUND');
+});
+test('update/replace/delete: the string id is URL-encoded like collection/table (a UUID-ish id with special chars round-trips)', async () => {
+  reply(200, { success: true, data: {} });
+  await client.updateDocument(BEARER, 'c', 't', 'a/b c', { x: 1 });
+  assert.equal(calls[0].url, `${HOST}/v1/collections/c/tables/t/${encodeURIComponent('a/b c')}`);
+});
+test('key-signing: update/replace/delete are allowed with the secret, through the proxy, with the right method each', async () => {
+  reply(200, { success: true, data: {} });
+  reply(200, { success: true, data: {} });
+  replyEmpty(204);
+  await client.updateDocument(KEY, 'c', 't', 41, { a: 1 });
+  await client.replaceDocument(KEY, 'c', 't', 41, { a: 1 });
+  await client.deleteDocument(KEY, 'c', 't', 41);
+  assert.deepEqual(calls.map(c => [c.body.method, c.body.endpoint, c.body.data]), [
+    ['PATCH', '/v1/collections/c/tables/t/41', { a: 1 }],
+    ['PUT', '/v1/collections/c/tables/t/41', { a: 1 }],
+    ['DELETE', '/v1/collections/c/tables/t/41', null],
+  ]);
+});
+
 // ── the CLI itself, spawned: exit codes and config show (rigpert 63609) ──────────────────────────────────────────────
 function cli(args, extraEnv = {}) {
   const home = mkdtempSync(join(tmpdir(), 'vsql-home-'));
@@ -265,4 +314,42 @@ test('cli: an unknown flag fails loud (rigpert 63618: `rows --limit 3` silently 
   assert.equal(cli(['query', '--help']).status, 0, '--help after a command still shows help');
   const ok = cli(['version', '--profile', 'x']);
   assert.equal(ok.status, 0, 'a known flag still works');
+});
+
+// ── PAY-1975 CLI layer: --data validation and delete's non-TTY refusal, no network involved ─────────────────────────
+test('cli: update/replace refuse invalid --data locally, before any request would be made', () => {
+  for (const cmd of ['update', 'replace']) {
+    const r = cli([cmd, 'c', 't', '41', '--data', 'not json']);
+    assert.notEqual(r.status, 0, `${cmd} with bad JSON exits non-zero`);
+    assert.match(r.stderr, /INVALID_JSON/, `${cmd}: ${r.stderr}`);
+  }
+  const arr = cli(['update', 'c', 't', '41', '--data', '[1,2,3]']);
+  assert.notEqual(arr.status, 0);
+  assert.match(arr.stderr, /INVALID_JSON.*JSON object/);
+});
+test('cli: update/replace/delete require collection, table AND id (missing id is not silently treated as the table)', () => {
+  const r = cli(['update', 'c', 't', '--data', '{}']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /MISSING_ARGS/);
+});
+test('cli: delete without --yes, run non-interactively (no TTY), refuses rather than deleting or hanging on an unanswerable prompt', () => {
+  const r = cli(['delete', 'c', 't', '41']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /CONFIRMATION_REQUIRED/);
+  assert.match(r.stderr, /--yes/);
+  // the alias behaves identically
+  const aliased = cli(['data', 'delete', 'c', 't', '41']);
+  assert.notEqual(aliased.status, 0);
+  assert.match(aliased.stderr, /CONFIRMATION_REQUIRED/);
+});
+test('cli: `data update|replace|delete` are aliases - same validation as the bare commands', () => {
+  const badJson = cli(['data', 'update', 'c', 't', '41', '--data', 'nope']);
+  assert.notEqual(badJson.status, 0);
+  assert.match(badJson.stderr, /INVALID_JSON/);
+  const unknownSub = cli(['data', 'wat', 'c', 't', '41']);
+  assert.notEqual(unknownSub.status, 0);
+  assert.match(unknownSub.stderr, /UNKNOWN_COMMAND.*data wat/);
+  const noSub = cli(['data']);
+  assert.notEqual(noSub.status, 0);
+  assert.match(noSub.stderr, /UNKNOWN_COMMAND/);
 });

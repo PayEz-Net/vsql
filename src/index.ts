@@ -19,7 +19,7 @@ import {
 import { formatRows, detectFormat, type Format } from './format.js';
 import { fatal } from './errors.js';
 
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 
 interface Flags {
   host?: string;
@@ -80,6 +80,41 @@ async function prompt(question: string): Promise<string> {
   return new Promise(resolve => {
     rl.question(question, answer => { rl.close(); resolve(answer.trim()); });
   });
+}
+
+/**
+ * PAY-1975: parse a --data payload for a single-row write. Reject invalid JSON locally, with the
+ * offending text and the parser's own message, rather than letting a malformed body reach the
+ * server half-parsed (or, worse, sent as a literal string).
+ */
+function parseDataFlag(raw: string, usage: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    fatal('INVALID_JSON', `--data is not valid JSON: ${(err as Error).message}`, usage);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    fatal('INVALID_JSON', '--data must be a JSON object, e.g. \'{"key":"value"}\'.', usage);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * PAY-1975 delete safety: a TTY prompts for confirmation (`--yes` skips it); a non-TTY without
+ * `--yes` refuses outright, so a hackathon script piping into `vsql delete` can't delete by
+ * accident just because nothing was there to answer a prompt it never saw. Returns false (and
+ * prints why) on anything short of an explicit "yes" - the caller `break`s rather than deleting,
+ * the same cancel idiom `rollback` and `schema update` already use.
+ */
+async function confirmDelete(collection: string, table: string, id: string, flags: Flags): Promise<boolean> {
+  if (flags.yes) return true;
+  if (!process.stdin.isTTY) {
+    fatal('CONFIRMATION_REQUIRED', `Refusing to delete ${collection}.${table} id=${id} without confirmation.`, 'Pass --yes to delete without a prompt (non-interactive).');
+  }
+  const answer = await prompt(`Delete ${collection}.${table} id=${id}? Type "yes" to confirm: `);
+  if (answer !== 'yes') { console.log('Delete cancelled.'); return false; }
+  return true;
 }
 
 function getTableNames(schema: unknown): string[] {
@@ -530,6 +565,72 @@ async function run(): Promise<void> {
       break;
     }
 
+    // PAY-1975: row update/replace/delete on /v1/collections/{c}/tables/{t}/{id}. `data update|replace|delete`
+    // (below, the 1.1.1 spelling) are aliases of these three - same args, same behavior.
+    case 'update':
+    case 'replace': {
+      const collection = positional;
+      const table = positionals[1];
+      const id = positionals[2];
+      const usage = `Usage: vsql ${command} <collection> <table> <id> --data '{"key":"value"}'`;
+      if (!collection || !table || !id) fatal('MISSING_ARGS', 'Collection, table and id required.', usage);
+      if (!flags.data) fatal('NO_DATA', 'No data provided.', usage);
+      const doc = parseDataFlag(flags.data, usage);
+      const conn = await resolveConn(flags);
+      if (command === 'update') {
+        await client.updateDocument(conn, collection, table, id, doc);
+        console.log(`Updated ${collection}.${table} id=${id}.`);
+      } else {
+        await client.replaceDocument(conn, collection, table, id, doc);
+        console.log(`Replaced ${collection}.${table} id=${id}.`);
+      }
+      break;
+    }
+
+    case 'delete': {
+      const collection = positional;
+      const table = positionals[1];
+      const id = positionals[2];
+      if (!collection || !table || !id) fatal('MISSING_ARGS', 'Collection, table and id required.', 'Usage: vsql delete <collection> <table> <id> [--yes]');
+      if (!(await confirmDelete(collection, table, id, flags))) break;
+      const conn = await resolveConn(flags);
+      await client.deleteDocument(conn, collection, table, id);
+      console.log(`Deleted ${collection}.${table} id=${id}.`);
+      break;
+    }
+
+    // 1.1.1 compatibility: `vsql data update|replace|delete <collection> <table> <id> ...` - the ADO CLI's spelling,
+    // kept so those docs/scripts still work. Same args, same behavior as the bare commands above.
+    case 'data': {
+      const sub = positional;
+      if (sub !== 'update' && sub !== 'replace' && sub !== 'delete') {
+        fatal('UNKNOWN_COMMAND', sub ? `Unknown command "data ${sub}".` : '`vsql data` needs a subcommand.', 'Usage: vsql data <update|replace|delete> <collection> <table> <id> ...');
+      }
+      const collection = positionals[1];
+      const table = positionals[2];
+      const id = positionals[3];
+      const usage = `Usage: vsql data ${sub} <collection> <table> <id>${sub === 'delete' ? ' [--yes]' : ` --data '{"key":"value"}'`}`;
+      if (!collection || !table || !id) fatal('MISSING_ARGS', 'Collection, table and id required.', usage);
+      if (sub === 'delete') {
+        if (!(await confirmDelete(collection, table, id, flags))) break;
+        const conn = await resolveConn(flags);
+        await client.deleteDocument(conn, collection, table, id);
+        console.log(`Deleted ${collection}.${table} id=${id}.`);
+        break;
+      }
+      if (!flags.data) fatal('NO_DATA', 'No data provided.', usage);
+      const doc = parseDataFlag(flags.data, usage);
+      const conn = await resolveConn(flags);
+      if (sub === 'update') {
+        await client.updateDocument(conn, collection, table, id, doc);
+        console.log(`Updated ${collection}.${table} id=${id}.`);
+      } else {
+        await client.replaceDocument(conn, collection, table, id, doc);
+        console.log(`Replaced ${collection}.${table} id=${id}.`);
+      }
+      break;
+    }
+
     case 'login': {
       const profile = flags.profile ?? 'default';
       // --host is honored so the same login can target a non-default host.
@@ -618,6 +719,9 @@ Commands:
   schema show <collection> Dump active JSON schema
   schema update <col>      Push schema from file
   insert <col> <table>     Insert documents
+  update <col> <table> <id>   Merge-update a document (PATCH); alias: data update
+  replace <col> <table> <id>  Whole-document replace (PUT); alias: data replace
+  delete <col> <table> <id>   Delete a document; alias: data delete
   rows <col> <table>       Read a table's rows back (--page, --page-size)
   collections              List your collections (those with documents)
   rollback <collection>    Roll back a schema collection
@@ -632,7 +736,7 @@ Options:
   --email <email>       Alias for --passwordless (with login)
   --format <fmt>        Output format: table, json, csv, raw
   --file <path>         Read SQL/schema/doc from a file
-  --data <json>         Inline JSON for insert
+  --data <json>         Inline JSON for insert/update/replace
   --batch               Insert each element of a JSON array
   --page <n>            Page of rows to read (rows; default 1)
   --page-size <n>       Rows per page (rows; default 20)
@@ -649,8 +753,8 @@ Environment:
 
 Key-signing (VIBE_CLIENT_ID + VIBE_HMAC_KEY set): calls go through the identity service
 (VSQL_IDP_URL) signed with your KeelBase secret. It covers query, health, rows, collections,
-schema show, rollback --list and insert. Schema changes (schema update, rollback) use your sign-in:
-run \`vsql login\` with the two variables unset.
+schema show, rollback --list, insert, update, replace and delete. Schema changes (schema update,
+rollback) use your sign-in: run \`vsql login\` with the two variables unset.
 
 Examples:
   vsql login
@@ -659,6 +763,9 @@ Examples:
   vsql schema show vibe_agents
   vsql schema update vibe_agents --file schema.json
   vsql insert vibe_agents agents --file agent.json
+  vsql update vibe_agents agents 243791 --data '{"city":"Chennai"}'
+  vsql replace vibe_agents agents 243791 --data '{"city":"Chennai","name":"..."}'
+  vsql delete vibe_agents agents 243791 --yes
   vsql rows vibe_agents agents --page-size 5
   vsql rollback my_schema --list`);
 }
