@@ -345,14 +345,34 @@ test('loadDotEnv: a missing .env is not an error; malformed lines are skipped, n
     rmSync(dir, { recursive: true, force: true });
   }
 });
-test('describeHealthSource: names key-signing + which var supplied the client id (env vs .env)', () => {
+test('describeHealthSource: names key-signing + which var supplied the client id AND the key (env vs .env)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
   writeFileSync(join(dir, '.env'), `VIBE_CLIENT_ID=${KEY.clientId}\nVIBE_HMAC_KEY=${TEST_SECRET}\n`);
   try {
     loadDotEnv(dir);
     const src = describeHealthSource({});
     assert.equal(src.mode, 'key-signing');
+    assert.equal(src.clientIdSource, '.env');
     assert.equal(src.keySource, '.env');
+  } finally {
+    delete process.env.VIBE_CLIENT_ID; delete process.env.VIBE_HMAC_KEY;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('describeHealthSource: MIXED sources (rigpert 67321) - client id and key can come from DIFFERENT places, and must be named separately, not collapsed into one', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
+  // Exactly Vasanth's shape: VIBE_CLIENT_ID from the real env, VIBE_HMAC_KEY only in .env.
+  // A DISTINCT client id (not KEY.clientId, which other tests load FROM .env with the same
+  // string) - source is tracked by value, so reusing that constant here would coincidentally
+  // "match" a stale .env-loaded value from an earlier test and mask exactly this class of bug.
+  const REAL_ENV_CLIENT_ID = 'vibe_ffffffffffffffff';
+  writeFileSync(join(dir, '.env'), `VIBE_HMAC_KEY=${TEST_SECRET}\n`);
+  process.env.VIBE_CLIENT_ID = REAL_ENV_CLIENT_ID;
+  try {
+    loadDotEnv(dir);
+    const src = describeHealthSource({});
+    assert.equal(src.clientIdSource, 'env', 'client id came from the real shell env');
+    assert.equal(src.keySource, '.env', 'the key came from .env - a DIFFERENT source');
   } finally {
     delete process.env.VIBE_CLIENT_ID; delete process.env.VIBE_HMAC_KEY;
     rmSync(dir, { recursive: true, force: true });
@@ -477,6 +497,17 @@ test('cli: a real env var still wins over a conflicting .env value in the same d
 test('cli: `health` names its mode/host/key-source line to stderr before making the request', () => {
   const r = cli(['health'], { VSQL_HOST: 'http://127.0.0.1:1' });
   assert.match(r.stderr, /mode: anonymous \(host from VSQL_HOST \(env\)\)/, r.stderr);
+});
+test('cli: `health` in key mode names the client-id source AND the key source SEPARATELY (rigpert 67321 MUST - the mixed-source case)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-cwd-'));
+  try {
+    writeFileSync(join(dir, '.env'), `VIBE_HMAC_KEY=${TEST_SECRET}\n`);
+    // VIBE_CLIENT_ID from the real env, VIBE_HMAC_KEY only from .env - exactly Vasanth's shape.
+    const r = cli(['health'], { VIBE_CLIENT_ID: KEY.clientId, VSQL_IDP_URL: 'http://127.0.0.1:1' }, { cwd: dir });
+    assert.match(r.stderr, /client id from env, key from \.env/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── PAY-1978 CLI-level: `tables --schema` refused locally, before any auth/network attempt ──────────────────────────

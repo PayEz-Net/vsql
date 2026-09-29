@@ -721,8 +721,12 @@ async function run(): Promise<void> {
       const conn = resolveHealthConn(flags);
       const target = conn.kind === 'key' ? `${conn.idp} (KeelBase ${conn.clientId})` : conn.host;
       const hostname = target.replace(/^https?:\/\//, '');
+      // PAY-1978 MUST (rigpert 67321): name the client id's source and the key's source
+      // SEPARATELY - they can differ (a Windows user-level VIBE_HMAC_KEY beating the shell's
+      // while VIBE_CLIENT_ID still comes from the shell, exactly what bit Vasanth). A single
+      // combined source hides a mismatch between the two.
       const modeLine = conn.kind === 'key'
-        ? `mode: key-signing (client id from ${src.keySource ?? 'env'})`
+        ? `mode: key-signing (client id from ${src.clientIdSource ?? 'env'}, key from ${src.keySource ?? 'env'})`
         : `mode: ${src.mode} (host from ${src.hostSource})`;
       console.error(modeLine);
       const result = await client.health(conn);

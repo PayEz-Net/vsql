@@ -64,6 +64,10 @@ function debug(line: string): void {
 const DDL_WITH_KEY_HINT =
   'Schema changes use your sign-in, not a KeelBase secret: unset VIBE_CLIENT_ID / VIBE_HMAC_KEY and run `vsql login`.';
 
+/** query's own hint (rigpert 67321 NIT): "schema changes" alone reads wrong for a plain SELECT. */
+const QUERY_WITH_KEY_HINT =
+  'Queries and schema changes use your sign-in, not a KeelBase secret: unset VIBE_CLIENT_ID / VIBE_HMAC_KEY and run `vsql login`.';
+
 /** Refuse a schema change up front when the connection is a KeelBase secret - before any diff or confirmation prompt. */
 export function refuseDdlWithKey(conn: Conn, op: string): void {
   if (conn.kind === 'key') fatal('NOT_WITH_KEELBASE_SECRET', `\`${op}\` is not available with a KeelBase secret.`, DDL_WITH_KEY_HINT);
@@ -77,7 +81,7 @@ export function refuseDdlWithKey(conn: Conn, op: string): void {
  * permissions bug rather than "wrong mode for this command."
  */
 export function refuseQueryWithKey(conn: Conn): void {
-  if (conn.kind === 'key') fatal('NOT_WITH_KEELBASE_SECRET', '`query` is not available with a KeelBase secret.', DDL_WITH_KEY_HINT);
+  if (conn.kind === 'key') fatal('NOT_WITH_KEELBASE_SECRET', '`query` is not available with a KeelBase secret.', QUERY_WITH_KEY_HINT);
 }
 
 /**

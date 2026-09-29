@@ -30,13 +30,19 @@ const DEVICE_ID = 'vibe_agents_no_acp';
  * neither. Populated by `loadDotEnv()`; read by `health`/`config show` to name a value's SOURCE —
  * never the value itself. `envSource()` below is the one place that answers "where did this
  * come from", so `.env`-loading and reporting can't drift apart.
+ *
+ * Tracked by VALUE, not just key presence: `envSource(name)` reports '.env' only when
+ * process.env[name] STILL EQUALS the value loadDotEnv() set. A bare key->loaded Set would go
+ * stale the moment something else (a later real env var, a test) sets the SAME NAME to a
+ * DIFFERENT value without going through loadDotEnv again — reporting '.env' would then be wrong.
  */
-const DOTENV_KEYS = new Set<string>();
+const DOTENV_VALUES = new Map<string, string>();
 
 /** Which of ('env' | '.env' | undefined) supplied `name` in process.env right now. Never returns the value. */
 export function envSource(name: string): 'env' | '.env' | undefined {
-  if (process.env[name] === undefined) return undefined;
-  return DOTENV_KEYS.has(name) ? '.env' : 'env';
+  const current = process.env[name];
+  if (current === undefined) return undefined;
+  return DOTENV_VALUES.get(name) === current ? '.env' : 'env';
 }
 
 /**
@@ -69,7 +75,7 @@ export function loadDotEnv(cwd: string = process.cwd()): void {
     }
     if (process.env[key] !== undefined) continue; // a real env var already set it — never override
     process.env[key] = value;
-    DOTENV_KEYS.add(key);
+    DOTENV_VALUES.set(key, value);
   }
 }
 
@@ -351,7 +357,14 @@ export function resolveHost(flags: { host?: string; profile?: string }): string 
  */
 export interface HealthSource {
   mode: 'key-signing' | 'sign-in' | 'anonymous';
-  /** Where the KeelBase client id came from, in key-signing mode. */
+  /**
+   * Where VIBE_CLIENT_ID and VIBE_HMAC_KEY each came from, in key-signing mode - SEPARATELY.
+   * PAY-1978 MUST (rigpert 67321): the id and the key can come from DIFFERENT sources at once -
+   * that mixed-source case is exactly what bit Vasanth (a Windows user-level VIBE_HMAC_KEY
+   * beating the shell's, while VIBE_CLIENT_ID still came from the shell). Reporting only one
+   * combined source hides that; the two must be named independently.
+   */
+  clientIdSource?: 'env' | '.env';
   keySource?: 'env' | '.env';
   /** Where the host came from: the flag, an env var (real or .env), or a named saved profile. */
   hostSource: '--host' | 'VSQL_HOST (env)' | 'VSQL_HOST (.env)' | `profile "${string}"` | 'none';
@@ -360,8 +373,7 @@ export interface HealthSource {
 export function describeHealthSource(flags: { host?: string; profile?: string }): HealthSource {
   const key = process.env.VIBE_CLIENT_ID?.trim() && process.env.VIBE_HMAC_KEY?.trim();
   if (key && !flags.host) {
-    const src = envSource('VIBE_CLIENT_ID') ?? envSource('VIBE_HMAC_KEY');
-    return { mode: 'key-signing', keySource: src, hostSource: 'none' };
+    return { mode: 'key-signing', clientIdSource: envSource('VIBE_CLIENT_ID'), keySource: envSource('VIBE_HMAC_KEY'), hostSource: 'none' };
   }
   const profileName = flags.profile ?? 'default';
   const profile = getProfile(profileName);
