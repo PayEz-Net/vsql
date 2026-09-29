@@ -223,6 +223,30 @@ test('collections: GET /v1/collections; a bare array or { collections: [...] } b
   assert.deepEqual(await client.listCollections(BEARER), [{ collection: 'x' }]);
   assert.deepEqual(calls.map(c => [c.method, c.url]), [['GET', `${HOST}/v1/collections`], ['GET', `${HOST}/v1/collections`]]);
 });
+// ── PAY-1978: listSchemas() - GET /v1/schemas (bare), NOT /v1/enterprise/schemas ────────────────────────────────────
+test('listSchemas: exactly one GET /v1/schemas, parses the same camelCase DTO shape as getVersions', async () => {
+  reply(200, { success: true, data: [
+    { collectionSchemaId: 1, collection: 'vibe_agents', jsonSchema: '{"tables":{"agents":{}}}', version: 2, isActive: true, createdAt: '2026-09-29T00:00:00Z' },
+    { collectionSchemaId: 2, collection: 'vibe_app', jsonSchema: '{"tables":{}}', version: 1, isActive: true, createdAt: '2026-09-29T00:00:00Z' },
+  ] });
+  const schemas = await client.listSchemas(BEARER);
+  assert.deepEqual(calls.map(c => [c.method, c.url]), [['GET', `${HOST}/v1/schemas`]]);
+  assert.equal(calls[0].body, undefined, 'a GET carries no body');
+  assert.equal(schemas.length, 2);
+  assert.equal(schemas[0].collection, 'vibe_agents');
+  assert.deepEqual(schemas[0].json_schema, { tables: { agents: {} } });
+  assert.equal(schemas[0].is_active, true);
+});
+test('key-signing: listSchemas signs GET /v1/schemas through the proxy like other key-mode reads - no X-Vibe-Client-Secret header (the whole point of using /v1/schemas, not /v1/enterprise/schemas)', async () => {
+  reply(200, { success: true, data: [] });
+  await client.listSchemas(KEY);
+  const c = calls[0];
+  assert.equal(c.body.endpoint, '/v1/schemas');
+  assert.equal(c.body.method, 'GET');
+  assert.equal(c.body.data, null);
+  assert.equal(c.headers['X-Vibe-Client-Secret'], undefined, 'vsql never sends a client secret - this is the whole point of using /v1/schemas, not /v1/enterprise/schemas');
+});
+
 test('key-signing: rows and collections go through the proxy as signed GETs (read-only, allowed with the secret)', async () => {
   reply(200, { success: true, data: [] });
   reply(200, { success: true, data: [] });
@@ -453,4 +477,13 @@ test('cli: a real env var still wins over a conflicting .env value in the same d
 test('cli: `health` names its mode/host/key-source line to stderr before making the request', () => {
   const r = cli(['health'], { VSQL_HOST: 'http://127.0.0.1:1' });
   assert.match(r.stderr, /mode: anonymous \(host from VSQL_HOST \(env\)\)/, r.stderr);
+});
+
+// ── PAY-1978 CLI-level: `tables --schema` refused locally, before any auth/network attempt ──────────────────────────
+test('cli: `tables --schema` is refused locally (the information_schema framing is gone) - no auth/network is even attempted', () => {
+  const r = cli(['tables', '--schema', 'public']); // no VIBE_CLIENT_ID/HMAC_KEY, no profile - would otherwise fail on auth first
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /SCHEMA_FLAG_REMOVED/);
+  assert.match(r.stderr, /vsql schemas/);
+  assert.doesNotMatch(r.stderr, /NO_SESSION|NO_HOST/, 'refused before reaching auth resolution');
 });

@@ -187,6 +187,21 @@ export async function getVersions(conn: Conn, collection: string): Promise<Schem
   return ((body.data as Record<string, unknown>[] | undefined) ?? []).map(toVersion);
 }
 
+/**
+ * PAY-1978 (Jon-ruled design, BAPert 67301): every collection's ACTIVE schema, in ONE call - the
+ * basis for `vsql schemas` and the rewritten `vsql tables`. GET /v1/schemas (bare, NOT
+ * /v1/enterprise/schemas): that route requires X-Vibe-Client-Secret at the middleware layer
+ * (VibeClientAuthMiddleware.cs EnterprisePrefixes), which vsql's key mode never sends - it would
+ * 401. This one is under AdminPrefixes, HMAC-only, the same posture `insert`/`collections`
+ * already use. Includes collections with NO documents yet (unlike `collections`, which only
+ * lists ones that have some) - closes that gap too.
+ */
+export async function listSchemas(conn: Conn): Promise<SchemaVersion[]> {
+  const res = await send(conn, 'schemas', 'GET', '/v1/schemas');
+  const body = await expectOk(res);
+  return ((body.data as Record<string, unknown>[] | undefined) ?? []).map(toVersion);
+}
+
 export async function getActiveSchema(conn: Conn, collection: string): Promise<{ version: number; schema: unknown; created_at: string }> {
   const versions = await getVersions(conn, collection);
   const active = versions.find(v => v.is_active);

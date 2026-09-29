@@ -389,13 +389,41 @@ async function run(): Promise<void> {
     }
 
     case 'tables': {
+      // PAY-1978 (Jon-ruled): information_schema.tables 403s for tenant keys on prod - the raw
+      // query path is platform-admin-only. Tables now come from the Vibe-native GET /v1/schemas
+      // (client.listSchemas), the same source `schemas` uses. --schema no longer means anything
+      // here (there is no Postgres schema namespace to pick) - refuse it locally rather than
+      // silently ignore it.
+      if (flags.schema) fatal('SCHEMA_FLAG_REMOVED', '--schema is not used by `tables` any more.', 'Run `vsql schemas` to see every collection and its schema.');
       const conn = await resolveConn(flags);
-      const schema = flags.schema ?? 'public';
-      const sql = `SELECT table_name FROM information_schema.tables WHERE table_schema = '${schema}' ORDER BY table_name`;
-      const result = await client.query(conn, sql);
-      const rows = result.data ?? result.rows ?? [];
-      const format = detectFormat(flags.format);
-      console.log(formatRows(rows, format));
+      const schemas = await client.listSchemas(conn);
+      const active = schemas.filter(s => s.is_active);
+      if (positional) {
+        const match = active.find(s => s.collection === positional);
+        if (!match) fatal('COLLECTION_NOT_FOUND', `No active schema for collection "${positional}".`, 'Run `vsql schemas` to see what exists.');
+        const tables = getTableNames(match.json_schema);
+        if (tables.length === 0) { console.log(`${positional}: no tables.`); break; }
+        console.log(formatRows(tables.map(t => ({ table: t })), detectFormat(flags.format)));
+      } else {
+        if (active.length === 0) { console.log('No collections.'); break; }
+        for (const s of active) {
+          const tables = getTableNames(s.json_schema);
+          console.log(`${s.collection}: ${tables.length === 0 ? '(no tables)' : tables.join(', ')}`);
+        }
+      }
+      break;
+    }
+
+    case 'schemas': {
+      // PAY-1978 (Jon-ruled): every collection and its active schema, including ones with no
+      // documents yet - `collections` only lists collections that have some.
+      const conn = await resolveConn(flags);
+      const schemas = (await client.listSchemas(conn)).filter(s => s.is_active);
+      if (schemas.length === 0) { console.log('No collections.'); break; }
+      console.log(formatRows(
+        schemas.map(s => ({ collection: s.collection, version: s.version, tables: getTableNames(s.json_schema).length, created_at: s.created_at })),
+        detectFormat(flags.format),
+      ));
       break;
     }
 
@@ -729,8 +757,9 @@ Usage: vsql <command> [options]
 Commands:
   login                    Authenticate via IDP (device-code by default)
   logout                   Clear stored tokens from the profile
-  query <sql>              Execute a SQL query
-  tables                   List all tables
+  query <sql>              Execute a SQL query (sign-in only)
+  tables [collection]      List tables - one collection's, or all grouped by collection
+  schemas                  List every collection and its active schema (including empty ones)
   describe <table>         Show column details for a table
   schema show <collection> Dump active JSON schema
   schema update <col>      Push schema from file
@@ -768,14 +797,17 @@ Environment:
   VSQL_DEBUG            Set to 1 to print each request's target to stderr (never a credential)
 
 Key-signing (VIBE_CLIENT_ID + VIBE_HMAC_KEY set): calls go through the identity service
-(VSQL_IDP_URL) signed with your KeelBase secret. It covers query, health, rows, collections,
-schema show, rollback --list, insert, update, replace and delete. Schema changes (schema update,
-rollback) use your sign-in: run \`vsql login\` with the two variables unset.
+(VSQL_IDP_URL) signed with your KeelBase secret. It covers health, tables, schemas, rows,
+collections, schema show, rollback --list, insert, update, replace and delete. query and schema
+CHANGES (schema update, rollback) use your sign-in: run \`vsql login\` with the two variables unset.
 
 Examples:
   vsql login
   vsql login --passwordless you@example.com
   vsql query "SELECT * FROM users LIMIT 5"
+  vsql schemas
+  vsql tables
+  vsql tables vibe_agents
   vsql schema show vibe_agents
   vsql schema update vibe_agents --file schema.json
   vsql insert vibe_agents agents --file agent.json
