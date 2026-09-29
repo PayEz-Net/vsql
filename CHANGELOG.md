@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.3.2 — unreleased
+## 1.3.3 — 2026-09-29
 
-PAY-1978 (Jon-ruled, from the Vasanth intake `E:/Repos/Agents/jon.ranes/releases/v086-intake-vasanth-first-tester-2026-09-29.md`, flaws 1-4). One release for everything the first external tester hit, on top of v1.3.1.
+PAY-1978 (Jon-ruled, from the Vasanth intake `E:/Repos/Agents/jon.ranes/releases/v086-intake-vasanth-first-tester-2026-09-29.md`, flaws 1-4). One release for everything the first external tester hit, on top of v1.3.1 — plus PAY-1814, the `KEELBASE_CLIENT_ID` rename (rigpert 67421: the rename must ship with this line, not as a separate 1.4.0).
 
 ### Added
 - **`vsql schemas`** — every collection and its active schema, including ones with no documents yet (`collections` only shows ones that have some). **`vsql tables [collection]`** — a collection's tables, or with no argument every table grouped by collection. Both read `GET /v1/schemas` (bare), NOT `/v1/enterprise/schemas`: that route requires an `X-Vibe-Client-Secret` vsql's key mode never sends and would 401. `GET /v1/schemas` is HMAC-only, the same posture `insert`/`collections` already use, and works with a KeelBase secret. `tables` no longer reads `information_schema`, which 403'd for every tenant key on prod — that was the actual bug Vasanth hit. Its old `--schema <name>` flag (a Postgres schema namespace) no longer applies and is refused locally with a pointer to `vsql schemas`.
@@ -12,6 +12,7 @@ PAY-1978 (Jon-ruled, from the Vasanth intake `E:/Repos/Agents/jon.ranes/releases
 
 ### Changed
 - README: `query` and schema-changing commands moved out of the key-signing "covers" list into the sign-in-only list (they were never actually reachable with a key on the hosted API; the README just hadn't caught up). Reading a schema (`schema show`, `rollback --list`) stays key-signable, since it's a read, not a change.
+- **`KEELBASE_CLIENT_ID` replaces `VSQL_CLIENT_ID` as the client the CLI signs in on** (PAY-1814). Its value is your **Tenant** — the name your KeelBase page shows as "Tenant" — not your KeelBase client id (the `vibe_...` signing credential). `VSQL_CLIENT_ID` is still read as a **deprecated fallback**, with one warning, so existing `.env` files keep working. If both are set to **different** values the CLI refuses rather than guess; if neither is set it fails loud, as before.
 
 ## 1.3.1 — 2026-09-29
 
