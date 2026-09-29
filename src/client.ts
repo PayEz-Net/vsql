@@ -70,6 +70,17 @@ export function refuseDdlWithKey(conn: Conn, op: string): void {
 }
 
 /**
+ * PAY-1975 v1.3.2 (Vasanth intake, flaw 2; Jon's design ruling): the KeelBase key is the
+ * APPLICATION's identity. `query` and DDL run on the developer's own sign-in so they are
+ * attributed to a person, not the app. Refuse LOCALLY with the sign-in hint, before the request -
+ * today the server sends it anyway and answers RAW_SQL_PLATFORM_ADMIN_ONLY, which reads like a
+ * permissions bug rather than "wrong mode for this command."
+ */
+export function refuseQueryWithKey(conn: Conn): void {
+  if (conn.kind === 'key') fatal('NOT_WITH_KEELBASE_SECRET', '`query` is not available with a KeelBase secret.', DDL_WITH_KEY_HINT);
+}
+
+/**
  * ONE place every call is sent from.
  *  - bearer / anon: `${host}${path}` with the sign-in's access token (none for anon).
  *  - key: POST {IdP}/api/vibe/proxy with { endpoint: path, method, data } and X-Vibe-Client-Id / -Timestamp / -Signature

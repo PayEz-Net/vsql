@@ -24,9 +24,9 @@ To build from source instead: `git clone https://github.com/PayEz-Net/vsql.git &
 | For | Use | Covers |
 |-----|-----|--------|
 | **You, at the terminal: schemas, DDL, admin, ad-hoc queries** | Your **sign-in** (`vsql login`, device code). The primary path. | every command |
-| **An app's runtime calls** (a test app, a script, a service) | Your **KeelBase client id + KeelBase secret** from the KeelBase page | `query`, `health`, `schema show`, `rollback --list`, `insert`, `update`, `replace`, `delete` |
+| **An app's runtime calls** (a test app, a script, a service) | Your **KeelBase client id + KeelBase secret** from the KeelBase page | `health`, `collections`, `rows`, `schema show`, `rollback --list`, `insert`, `update`, `replace`, `delete` |
 
-Schema changes (`schema update`, `rollback`) always use your sign-in: with a KeelBase secret set they are refused and point you at `vsql login`.
+`query`, and anything that CHANGES a schema (`schema update`, `rollback`), always use your sign-in: with a KeelBase secret set they are refused locally, with a hint pointing you at `vsql login`, and nothing is sent. Reading a schema (`schema show`, `rollback --list`) is data access, not a change, so it still works with the key. This is by design (not a permissions bug) — the KeelBase secret is the *application's* identity; queries and schema changes are attributed to a *person*, so they run on your sign-in.
 
 ## Quick start: sign in (primary)
 
@@ -69,7 +69,7 @@ vsql collections                             # your collections
 vsql rows vibe_agents agents                 # read a table's rows back
 ```
 
-Key-signing covers `query`, `health`, `collections`, `rows`, `schema show`, `rollback --list`, `insert`, `update`, `replace` and `delete`. Schema changes (`schema update`, `rollback`) use your sign-in.
+Key-signing covers `health`, `collections`, `rows`, `schema show`, `rollback --list`, `insert`, `update`, `replace` and `delete`. `query` and schema CHANGES (`schema update`, `rollback`) use your sign-in.
 
 With both variables set, every call goes through the identity service's proxy (`POST {IdP}/api/vibe/proxy`), signed `base64(HMAC-SHA256(base64decode(secret), "{unix seconds}|{METHOD}|{endpoint}"))`. What to know:
 

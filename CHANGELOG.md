@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.2 — unreleased
+
+PAY-1978 (Jon-ruled, from the Vasanth intake `E:/Repos/Agents/jon.ranes/releases/v086-intake-vasanth-first-tester-2026-09-29.md`, flaws 2-4). One release for everything the first external tester hit, on top of v1.3.1.
+
+### Added
+- **`.env` loading.** `vsql` now reads a `.env` file from the CURRENT WORKING DIRECTORY (not the install location) before any command runs. A real environment variable already set is NEVER overridden by a `.env` value — the real one silently wins, by design. Missing/unreadable `.env` is not an error; malformed lines are skipped, not fatal.
+- **`vsql health` names its sources.** Prints, to stderr, the mode (`key-signing`, `sign-in` or `anonymous`), the host it checked, and where each came from: `--host`, `VSQL_HOST` (env or `.env`), a named saved profile, or (for the key pair) `env`/`.env` — never the credential VALUE. Closes two silent-failure shapes measured on Vasanth's machine: a Windows user-level `VIBE_HMAC_KEY` silently beating the shell's value, and `health` falling back to an old saved profile and reporting "healthy" for a different server with no indication it had done so.
+- **Key-mode `query` refuses locally, with the sign-in hint.** The KeelBase secret is the *application's* identity; `query` and schema changes are attributed to a *person*, so they run on your sign-in (Jon's design ruling). With a KeelBase secret set, `vsql query` now refuses before sending anything (`NOT_WITH_KEELBASE_SECRET`, the same hint DDL already gives) instead of reaching the server and getting back `RAW_SQL_PLATFORM_ADMIN_ONLY`, which read like a permissions bug rather than "wrong mode for this command."
+
+### Changed
+- README: `query` and schema-changing commands moved out of the key-signing "covers" list into the sign-in-only list (they were never actually reachable with a key on the hosted API; the README just hadn't caught up). Reading a schema (`schema show`, `rollback --list`) stays key-signable, since it's a read, not a change.
+
 ## 1.3.1 — 2026-09-29
 
 PAY-1975 (Vasanth's hackathon, Jon, today): v1.3.0 had `insert` but no way to update or delete a

@@ -4,6 +4,7 @@ import * as client from './client.js';
 import {
   resolveConn,
   resolveHealthConn,
+  describeHealthSource,
   getProfile,
   setProfileHost,
   saveProfile,
@@ -14,6 +15,7 @@ import {
   idpBase,
   clientId,
   deviceId,
+  loadDotEnv,
   type Profile,
 } from './config.js';
 import { formatRows, detectFormat, type Format } from './format.js';
@@ -362,6 +364,11 @@ async function loginPasswordless(profileName: string, emailArg?: string): Promis
 }
 
 async function run(): Promise<void> {
+  // PAY-1975 v1.3.2 (Vasanth intake, flaw 3): before anything else reads an env var, load .env
+  // from the CURRENT DIRECTORY. Must run before parseArgs/resolveConn/idpBase/clientId — all of
+  // which read process.env directly — so it is the very first statement in run().
+  loadDotEnv();
+
   const args = process.argv.slice(2);
   const { command, positionals, flags } = parseArgs(args);
   const positional = positionals[0] ?? '';
@@ -369,6 +376,7 @@ async function run(): Promise<void> {
   switch (command) {
     case 'query': {
       const conn = await resolveConn(flags);
+      client.refuseQueryWithKey(conn);
       let sql = positional;
       if (flags.file) sql = readFileSync(flags.file, 'utf-8').trim();
       if (!sql) fatal('NO_QUERY', 'No SQL provided.', 'Pass SQL as argument or use --file.');
@@ -678,10 +686,18 @@ async function run(): Promise<void> {
     }
 
     case 'health': {
+      // PAY-1975 v1.3.2 (Vasanth intake, flaws 3+4): name the mode, host and credential SOURCE
+      // (never the value) BEFORE the request - a stale saved profile or a shadowing env var is
+      // then visible immediately, rather than reading as "healthy" for the wrong server.
+      const src = describeHealthSource(flags);
       const conn = resolveHealthConn(flags);
-      const result = await client.health(conn);
       const target = conn.kind === 'key' ? `${conn.idp} (KeelBase ${conn.clientId})` : conn.host;
       const hostname = target.replace(/^https?:\/\//, '');
+      const modeLine = conn.kind === 'key'
+        ? `mode: key-signing (client id from ${src.keySource ?? 'env'})`
+        : `mode: ${src.mode} (host from ${src.hostSource})`;
+      console.error(modeLine);
+      const result = await client.health(conn);
       const ver = result.version ? `, ${result.version}` : '';
       console.log(`${hostname}: ${result.status} (${result.latencyMs}ms${ver})`);
       break;

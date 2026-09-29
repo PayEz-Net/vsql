@@ -8,9 +8,9 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import * as client from '../dist/client.js';
 import { signProxyRequest, decodeSecret } from '../dist/signing.js';
-import { keyCredentials } from '../dist/config.js';
+import { keyCredentials, loadDotEnv, envSource, describeHealthSource } from '../dist/config.js';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -280,12 +280,76 @@ test('key-signing: update/replace/delete are allowed with the secret, through th
   ]);
 });
 
+// ── PAY-1975 v1.3.2 (Vasanth intake): .env loading, source naming, key-mode query refusal ──────────────────────────
+test('loadDotEnv: reads .env from the given cwd into process.env, and envSource reports it as .env', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
+  writeFileSync(join(dir, '.env'), 'VSQL_TEST_A=hello\nVSQL_TEST_B="quoted value"\n# a comment\n\nVSQL_TEST_C=\'single quoted\'\n');
+  try {
+    loadDotEnv(dir);
+    assert.equal(process.env.VSQL_TEST_A, 'hello');
+    assert.equal(process.env.VSQL_TEST_B, 'quoted value', 'double quotes stripped');
+    assert.equal(process.env.VSQL_TEST_C, 'single quoted', 'single quotes stripped');
+    assert.equal(envSource('VSQL_TEST_A'), '.env');
+  } finally {
+    delete process.env.VSQL_TEST_A; delete process.env.VSQL_TEST_B; delete process.env.VSQL_TEST_C;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('loadDotEnv: NEVER overrides a real env var already set, and envSource reports THAT as env not .env', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
+  writeFileSync(join(dir, '.env'), 'VSQL_TEST_D=from-dotenv\n');
+  process.env.VSQL_TEST_D = 'from-real-env';
+  try {
+    loadDotEnv(dir);
+    assert.equal(process.env.VSQL_TEST_D, 'from-real-env', 'the real env var won, unchanged');
+    assert.equal(envSource('VSQL_TEST_D'), 'env');
+  } finally {
+    delete process.env.VSQL_TEST_D;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('loadDotEnv: a missing .env is not an error; malformed lines are skipped, not fatal', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
+  try {
+    assert.doesNotThrow(() => loadDotEnv(dir)); // no .env at all
+    writeFileSync(join(dir, '.env'), 'not a valid line\n=starts with equals\nVSQL_TEST_E=ok\n123INVALID=nope\n');
+    loadDotEnv(dir);
+    assert.equal(process.env.VSQL_TEST_E, 'ok', 'the one well-formed line still loaded');
+    assert.equal(process.env['123INVALID'], undefined, 'a non-identifier key is skipped');
+  } finally {
+    delete process.env.VSQL_TEST_E;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('describeHealthSource: names key-signing + which var supplied the client id (env vs .env)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
+  writeFileSync(join(dir, '.env'), `VIBE_CLIENT_ID=${KEY.clientId}\nVIBE_HMAC_KEY=${TEST_SECRET}\n`);
+  try {
+    loadDotEnv(dir);
+    const src = describeHealthSource({});
+    assert.equal(src.mode, 'key-signing');
+    assert.equal(src.keySource, '.env');
+  } finally {
+    delete process.env.VIBE_CLIENT_ID; delete process.env.VIBE_HMAC_KEY;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('describeHealthSource: names the host source - flag, VSQL_HOST env, or a named saved profile', () => {
+  assert.equal(describeHealthSource({ host: 'https://x.test' }).hostSource, '--host');
+  process.env.VSQL_HOST = 'https://y.test';
+  try {
+    assert.equal(describeHealthSource({}).hostSource, 'VSQL_HOST (env)');
+  } finally {
+    delete process.env.VSQL_HOST;
+  }
+});
+
 // ── the CLI itself, spawned: exit codes and config show (rigpert 63609) ──────────────────────────────────────────────
-function cli(args, extraEnv = {}) {
+function cli(args, extraEnv = {}, opts = {}) {
   const home = mkdtempSync(join(tmpdir(), 'vsql-home-'));
   const env = { ...saved.env, HOME: home, USERPROFILE: home, ...extraEnv };
   for (const k of ['VIBE_CLIENT_ID', 'VIBE_HMAC_KEY', 'VSQL_DEBUG']) if (!(k in extraEnv)) delete env[k];
-  const r = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/vsql.js', import.meta.url)), ...args], { env, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/vsql.js', import.meta.url)), ...args], { env, encoding: 'utf8', cwd: opts.cwd });
   rmSync(home, { recursive: true, force: true });
   return r;
 }
@@ -352,4 +416,41 @@ test('cli: `data update|replace|delete` are aliases - same validation as the bar
   const noSub = cli(['data']);
   assert.notEqual(noSub.status, 0);
   assert.match(noSub.stderr, /UNKNOWN_COMMAND/);
+});
+
+// ── PAY-1975 v1.3.2 CLI-level: key-mode query refusal, and .env picked up from cwd ───────────────────────────────────
+test('cli: `query` with a KeelBase secret refuses LOCALLY with the sign-in hint - nothing is sent', () => {
+  const r = cli(['query', 'select 1'], { VIBE_CLIENT_ID: 'vibe_25c8bbf4cd37c521', VIBE_HMAC_KEY: TEST_SECRET, VSQL_IDP_URL: 'https://idp.test' });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /NOT_WITH_KEELBASE_SECRET/);
+  assert.match(r.stderr, /vsql login/);
+  assert.doesNotMatch(r.stderr, /RAW_SQL_PLATFORM_ADMIN_ONLY/, 'refused before any request - never the server error');
+});
+test('cli: a .env file in the working directory is picked up - config show reports key-signing from a value ONLY in .env', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-cwd-'));
+  try {
+    writeFileSync(join(dir, '.env'), 'VIBE_CLIENT_ID=vibe_25c8bbf4cd37c521\nVIBE_HMAC_KEY=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n');
+    // config show reads the key vars directly from process.env, which loadDotEnv() populates before
+    // any command runs - so a value that ONLY exists in .env (never passed via extraEnv) still shows.
+    const r = cli(['config', 'show'], {}, { cwd: dir });
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /key-signing/, `.env was not picked up: ${r.stdout} / ${r.stderr}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('cli: a real env var still wins over a conflicting .env value in the same directory', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-cwd-'));
+  try {
+    writeFileSync(join(dir, '.env'), 'VSQL_HOST=http://127.0.0.1:2\n');
+    const r = cli(['health'], { VSQL_HOST: 'http://127.0.0.1:1' }, { cwd: dir });
+    assert.match(r.stderr, /127\.0\.0\.1:1/, `real env var should have won: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /127\.0\.0\.1:2/, 'the .env value must not have been used');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('cli: `health` names its mode/host/key-source line to stderr before making the request', () => {
+  const r = cli(['health'], { VSQL_HOST: 'http://127.0.0.1:1' });
+  assert.match(r.stderr, /mode: anonymous \(host from VSQL_HOST \(env\)\)/, r.stderr);
 });
