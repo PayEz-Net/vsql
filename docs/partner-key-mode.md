@@ -93,14 +93,14 @@ Two limits on any call through the proxy [read: PAY-2058, Core `VibeProxyControl
 
 ## 5. The `site_secrets` table: the platform's row is off limits
 
-Your `vibe_app.site_secrets` table holds a row whose `secret_name` is **`vibe_client_secret`**. It belongs to the platform, not to you. The identity service reads it on every call you make through the proxy [measured: DotNetPert, dev-93, log line on proxy calls; read: PAY-2058].
+Your `vibe_app.site_secrets` table holds a row whose `secret_name` is **`vibe_client_secret`**. It belongs to the platform, not to you. The identity service looks it up when you call through the proxy: on dev-93 it logged `VIBE_SECRET_CACHE: Secret for client 90651 is plaintext (legacy)` 78 times for this test client's proxy calls [measured: DotNetPert, dev-93, mail 69431]. That line shows a lookup and nothing more. Whether each call reads the row or is served from a cache is **not measured**, and the sources I read disagree: one says every call reads and decrypts it (the cache is never written), another says the Enterprise path caches it for an hour [read: PAY-2058 comment by QAPert; PAY-2053 description].
 
 **Do not create, edit, rename or delete that row, and do not create a second row with that name.** Your own secrets in the same table, under other names, are yours.
 
 What happened when it was touched, measured on dev-93 with a key-signed MvpOnly client (PAY-2053, build `6885dcae7`):
 
 - A second row with the same name was accepted (201). Overwriting the platform row was accepted (200). Deleting it was accepted (204).
-- After deleting the duplicate as well, every proxy call answered 400 `NO_VIBE_SECRET`, and the table's own rows route answered 400 too: the client is locked out until a platform administrator re-creates the credentials with the heal call (`POST /api/ClientAdmin/clients/{N}/vibe-credentials`). A partner cannot run that call.
+- After deleting the duplicate as well, every proxy call answered 400 `NO_VIBE_SECRET`, and the table's own rows route answered 400 too: the client is locked out until a platform administrator re-creates the credentials with the heal call (`POST /api/ClientAdmin/clients/{N}/vibe-credentials`). The heal is a client-admin route on the identity service, called with an administrator's sign-in, not with a key [measured: DotNetPert called it that way on dev-93, mail 69323; the roles it accepts, `payez_admin`, `vibe_client_admin` and `idp_client_admin`, are read: QAPert's route table on PAY-2053]. Nobody has measured a partner's key calling it, so do not rely on being able to.
 
 Today nothing in the API stops you from doing this. A server-side refusal and a uniqueness rule are specified and released for merge (PAY-2053) but are not on Core master as of 2026-10-06 (`4f31f177c`), so they are not deployed [read]. Until they are, keeping to this rule is up to you.
 
