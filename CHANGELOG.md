@@ -1,11 +1,11 @@
 # Changelog
 
-## 1.3.4 � 2026-10-06
+## 1.3.4 — 2026-10-06
 
 PAY-2052. `vsql describe` was the one command still on raw SQL; the hosted API refuses `information_schema` to a tenant key (403, measured by Nextpert-Scout on dev-93, mail 69331), so `describe` failed for every key-mode user, as `tables` did before 1.3.3.
 
 ### Changed
-- **`vsql describe <table> [collection]`** reads the active schema from `GET /v1/schemas` (HMAC-only, the same route `tables` uses) instead of `information_schema.columns`. Output columns are now `column_name`, `type`, `format`, `pk`, `auto_increment`, `nullable`. Differences from the SQL version: `nullable` is derived as "not in the table's `required` list", columns come in schema order (there is no ordinal), and there is no `column_default` (the schema carries none; `auto_increment` is the nearest). Works with a KeelBase secret.
+- **`vsql describe <table> [collection]`** reads the active schema from `GET /v1/schemas` (HMAC-only, the same route `tables` uses) instead of `information_schema.columns`. Output columns are now `column_name`, `type`, `format`, `pk`, `auto_increment`, `nullable`. Differences from the SQL version: `nullable` is derived as "not in the table's `required` list", columns come in schema order (there is no ordinal), and it does not print a column's default or enum values (a schema can set `default` and `enum` on a column; `describe` shows neither, so use `schema show <collection>` to read them). Works with a KeelBase secret.
 - A table name that exists in more than one collection now fails with `AMBIGUOUS_TABLE` and names the collections; pass the collection as the second argument. An unknown table or collection fails with `TABLE_NOT_FOUND` / `COLLECTION_NOT_FOUND`.
 
 ## 1.3.3 — 2026-09-29

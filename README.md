@@ -111,7 +111,7 @@ vsql describe notes             # the columns of table "notes"
 vsql describe notes vibe_app    # name the collection when the table is in more than one
 ```
 
-Reads `GET /v1/schemas`, like `tables`, so it works with a KeelBase secret. It prints each column's `column_name`, `type`, `format` (for example `date-time`), `pk`, `auto_increment` and `nullable`, in the schema's own column order. The schema has no nullability flag, so `nullable` is `YES` when the column is not in the table's `required` list. The schema has no column default either, so there is no `column_default` column (the SQL version printed one). A table name found in more than one collection is refused with `AMBIGUOUS_TABLE` and the collections named; an unknown table is `TABLE_NOT_FOUND`.
+Reads `GET /v1/schemas`, like `tables`, so it works with a KeelBase secret. It prints each column's `column_name`, `type`, `format` (for example `date-time`), `pk`, `auto_increment` and `nullable`, in the schema's own column order. The schema has no nullability flag, so `nullable` is `YES` when the column is not in the table's `required` list. It does not print a column's `default` or `enum` values, even when the schema sets them (the SQL version printed `column_default`); run `vsql schema show <collection>` to read them. A table name found in more than one collection is refused with `AMBIGUOUS_TABLE` and the collections named; an unknown table is `TABLE_NOT_FOUND`.
 
 ### `vsql schema show <collection>` / `vsql schema update <collection> --file schema.json`
 
