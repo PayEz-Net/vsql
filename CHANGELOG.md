@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.4 � 2026-10-06
+
+PAY-2052. `vsql describe` was the one command still on raw SQL; the hosted API refuses `information_schema` to a tenant key (403, measured by Nextpert-Scout on dev-93, mail 69331), so `describe` failed for every key-mode user, as `tables` did before 1.3.3.
+
+### Changed
+- **`vsql describe <table> [collection]`** reads the active schema from `GET /v1/schemas` (HMAC-only, the same route `tables` uses) instead of `information_schema.columns`. Output columns are now `column_name`, `type`, `format`, `pk`, `auto_increment`, `nullable`. Differences from the SQL version: `nullable` is derived as "not in the table's `required` list", columns come in schema order (there is no ordinal), and there is no `column_default` (the schema carries none; `auto_increment` is the nearest). Works with a KeelBase secret.
+- A table name that exists in more than one collection now fails with `AMBIGUOUS_TABLE` and names the collections; pass the collection as the second argument. An unknown table or collection fails with `TABLE_NOT_FOUND` / `COLLECTION_NOT_FOUND`.
+
 ## 1.3.3 — 2026-09-29
 
 PAY-1978 (Jon-ruled, from the Vasanth intake `E:/Repos/Agents/jon.ranes/releases/v086-intake-vasanth-first-tester-2026-09-29.md`, flaws 1-4). One release for everything the first external tester hit, on top of v1.3.1 — plus PAY-1814, the `KEELBASE_CLIENT_ID` rename (rigpert 67421: the rename must ship with this line, not as a separate 1.4.0).
