@@ -15,7 +15,7 @@ npm install -g https://github.com/PayEz-Net/vsql/releases/download/v1.3.3/vsql-1
 vsql version
 ```
 
-That installs the prebuilt release package and puts `vsql` on your PATH. **`npm install -g vsql` is not this package**: it installs an unrelated package of the same name from someone else, so always install from the release URL above. `vsql` is not on the npm registry: `@vibesql/cli` is not published, and the npm package called `vsql` belongs to someone else. A plain `npm install -g github:PayEz-Net/vsql` does not work either, because on npm 11 the build step cannot find TypeScript.
+That installs the prebuilt release package and puts `vsql` on your PATH. This CLI is not on the npm registry (`@vibesql/cli` is not published), and **`npm install -g vsql` is not this package**: it installs an unrelated package of the same name from someone else, so always install from the release URL above. A plain `npm install -g github:PayEz-Net/vsql` does not work either, because on npm 11 the build step cannot find TypeScript.
 
 To build from source instead: `git clone https://github.com/PayEz-Net/vsql.git && cd vsql && npm install && npm run build && npm link`.
 
@@ -24,9 +24,9 @@ To build from source instead: `git clone https://github.com/PayEz-Net/vsql.git &
 | For | Use | Covers |
 |-----|-----|--------|
 | **You, at the terminal: schemas, DDL, admin, ad-hoc queries** | Your **sign-in** (`vsql login`, device code). The primary path. | every command |
-| **An app's runtime calls** (a test app, a script, a service) | Your **KeelBase client id + KeelBase secret** from the KeelBase page | `query`, `health`, `schema show`, `rollback --list`, `insert` |
+| **An app's runtime calls** (a test app, a script, a service) | Your **KeelBase client id + KeelBase secret** from the KeelBase page | `health`, `tables`, `schemas`, `collections`, `rows`, `schema show`, `rollback --list`, `insert`, `update`, `replace`, `delete` |
 
-Schema changes (`schema update`, `rollback`) always use your sign-in: with a KeelBase secret set they are refused and point you at `vsql login`.
+`query`, and anything that CHANGES a schema (`schema update`, `rollback`), always use your sign-in: with a KeelBase secret set they are refused locally, with a hint pointing you at `vsql login`, and nothing is sent. Reading a schema (`schema show`, `rollback --list`) is data access, not a change, so it still works with the key. This is by design (not a permissions bug) — the KeelBase secret is the *application's* identity; queries and schema changes are attributed to a *person*, so they run on your sign-in.
 
 ## Quick start: sign in (primary)
 
@@ -69,7 +69,7 @@ vsql collections                             # your collections
 vsql rows vibe_agents agents                 # read a table's rows back
 ```
 
-Key-signing covers `query`, `health`, `collections`, `rows`, `schema show`, `rollback --list` and `insert`. Schema changes (`schema update`, `rollback`) use your sign-in.
+Key-signing covers `health`, `tables`, `schemas`, `collections`, `rows`, `schema show`, `rollback --list`, `insert`, `update`, `replace` and `delete`. `query` and schema CHANGES (`schema update`, `rollback`) use your sign-in.
 
 With both variables set, every call goes through the identity service's proxy (`POST {IdP}/api/vibe/proxy`), signed `base64(HMAC-SHA256(base64decode(secret), "{unix seconds}|{METHOD}|{endpoint}"))`. What to know:
 
@@ -90,9 +90,19 @@ vsql query "SELECT * FROM notes" --format json
 vsql query --file ./reports/monthly.sql
 ```
 
-The hosted query endpoint is **read-only for tenant data** until row-level security lands. Row writes go through `vsql insert` and schema changes through `vsql schema update`; a write sent to `query` gets the API's own refusal, printed as it comes. `tables` and `describe` read `information_schema`, which the same guard refuses on the hosted API.
+The hosted query endpoint is **read-only for tenant data** until row-level security lands. Row writes go through `vsql insert` and schema changes through `vsql schema update`; a write sent to `query` gets the API's own refusal, printed as it comes. `query` also only ever runs on your sign-in — with a KeelBase secret set it refuses locally instead of reaching the server (see [Two ways to authenticate](#two-ways-to-authenticate-for-two-jobs) above). `describe` reads `information_schema`, which the same guard refuses on the hosted API for a tenant key.
 
 Options: `--format <table|json|csv|raw>` (default `table`, `csv` when piped), `--file <path>`, `--host <url>`, `--profile <name>`.
+
+### `vsql schemas` / `vsql tables [collection]`
+
+```bash
+vsql schemas                  # every collection + its active schema (including empty ones)
+vsql tables                   # every table, grouped by collection
+vsql tables vibe_agents       # just vibe_agents' tables
+```
+
+Both read `GET /v1/schemas` — the Vibe-native schema listing, not `information_schema` (which 403s for a tenant key; `tables` used to hit it and inherited that failure). `schemas` shows every collection you have, even ones with no documents yet — `collections` only lists ones that already have some. Both work with a KeelBase secret. The old `--schema <name>` flag on `tables` (a Postgres schema namespace) no longer applies — there is no such namespace here — and is refused locally with a pointer to `vsql schemas`.
 
 ### `vsql schema show <collection>` / `vsql schema update <collection> --file schema.json`
 
@@ -112,6 +122,17 @@ vsql insert keelbase_demo notes --file rows.json --batch   # each element of a J
 ```
 
 The document is sent as-is; the collection's schema decides the required fields. The tenant comes from your credential. `--client-id` is accepted for old scripts and ignored.
+
+### `vsql update|replace|delete <collection> <table> <id>`
+
+```bash
+vsql update keelbase_demo notes 41 --data '{"title":"updated"}'   # PATCH: merges into the row
+vsql replace keelbase_demo notes 41 --data '{"title":"new"}'      # PUT: whole-document replace
+vsql delete keelbase_demo notes 41                                # prompts for confirmation
+vsql delete keelbase_demo notes 41 --yes                          # skip the prompt (scripts)
+```
+
+`update` merges the given fields into the row; `replace` overwrites the whole document. `--data` must be a JSON object — invalid JSON, or a non-object (an array, a bare string), fails locally with `INVALID_JSON` before anything is sent. `delete` prompts for confirmation on a terminal; `--yes` skips it; run non-interactively (piped, in a script, CI) without `--yes` and it refuses rather than deleting or hanging on a prompt nothing can answer. `data update|replace|delete` are aliases of these three, matching the older vsql-cli 1.1.1 spelling. All three work with a KeelBase secret, the same as `insert`.
 
 ### `vsql rows <collection> <table>` / `vsql collections`
 
