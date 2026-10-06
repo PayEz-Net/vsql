@@ -11,11 +11,11 @@ Zero runtime dependencies. Node.js 18+. Windows, macOS and Linux.
 ## Install
 
 ```bash
-npm install -g https://github.com/PayEz-Net/vsql/releases/download/v1.3.0/vsql-1.3.0.tgz
+npm install -g https://github.com/PayEz-Net/vsql/releases/download/v1.3.3/vsql-1.3.3.tgz
 vsql version
 ```
 
-That installs the prebuilt release package and puts `vsql` on your PATH. `vsql` is not on the npm registry: `@vibesql/cli` is not published, and the npm package called `vsql` belongs to someone else. A plain `npm install -g github:PayEz-Net/vsql` does not work either, because on npm 11 the build step cannot find TypeScript.
+That installs the prebuilt release package and puts `vsql` on your PATH. **`npm install -g vsql` is not this package**: it installs an unrelated package of the same name from someone else, so always install from the release URL above. `vsql` is not on the npm registry: `@vibesql/cli` is not published, and the npm package called `vsql` belongs to someone else. A plain `npm install -g github:PayEz-Net/vsql` does not work either, because on npm 11 the build step cannot find TypeScript.
 
 To build from source instead: `git clone https://github.com/PayEz-Net/vsql.git && cd vsql && npm install && npm run build && npm link`.
 
