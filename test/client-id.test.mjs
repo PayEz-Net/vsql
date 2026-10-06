@@ -113,3 +113,19 @@ test('PAY-1814 clientId(): a vibe_ value -> fatal CLIENT_ID_IS_KEELBASE_CLIENT_I
   assert.match(stderr, /CLIENT_ID_IS_KEELBASE_CLIENT_ID/);
   assert.match(stderr, /Tenant/, 'the hint points at the Tenant, not the vibe_ id');
 });
+
+// PAY-1814 provenance: the CLI version MUST equal package.json version
+// The 1.4.0 pack shipped a hardcoded VERSION='1.3.0' while package.json said 1.4.0, so the one thing a
+// tester can ask the binary answered wrong. The CLI now READS package.json; this pins the identity so a
+// future hardcode (or a missed bump) goes RED.
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
+
+test('PAY-1814: vsql version reports the package.json version (no hardcode can drift)', () => {
+  const bin = fileURLToPath(new URL('../bin/vsql.js', import.meta.url));
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const r = spawnSync(process.execPath, [bin, 'version'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes('v' + pkg.version), 'vsql version must be ' + pkg.version + ', got: ' + r.stdout);
+});

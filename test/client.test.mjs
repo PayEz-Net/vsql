@@ -8,9 +8,9 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import * as client from '../dist/client.js';
 import { signProxyRequest, decodeSecret } from '../dist/signing.js';
-import { keyCredentials } from '../dist/config.js';
+import { keyCredentials, loadDotEnv, envSource, describeHealthSource } from '../dist/config.js';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +30,12 @@ let calls, replies, stderr, saved;
 /** Queue a reply for the next fetch: a JSON body, or a raw string body. */
 function reply(status, body, statusText = '') {
   replies.push(() => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, statusText }));
+}
+
+/** Queue a reply with NO body - for null-body statuses (204/205/304), where the Fetch spec forbids any body,
+ *  even an empty string (`new Response('', {status:204})` throws). */
+function replyEmpty(status) {
+  replies.push(() => new Response(null, { status }));
 }
 
 beforeEach(() => {
@@ -217,6 +223,30 @@ test('collections: GET /v1/collections; a bare array or { collections: [...] } b
   assert.deepEqual(await client.listCollections(BEARER), [{ collection: 'x' }]);
   assert.deepEqual(calls.map(c => [c.method, c.url]), [['GET', `${HOST}/v1/collections`], ['GET', `${HOST}/v1/collections`]]);
 });
+// ── PAY-1978: listSchemas() - GET /v1/schemas (bare), NOT /v1/enterprise/schemas ────────────────────────────────────
+test('listSchemas: exactly one GET /v1/schemas, parses the same camelCase DTO shape as getVersions', async () => {
+  reply(200, { success: true, data: [
+    { collectionSchemaId: 1, collection: 'vibe_agents', jsonSchema: '{"tables":{"agents":{}}}', version: 2, isActive: true, createdAt: '2026-09-29T00:00:00Z' },
+    { collectionSchemaId: 2, collection: 'vibe_app', jsonSchema: '{"tables":{}}', version: 1, isActive: true, createdAt: '2026-09-29T00:00:00Z' },
+  ] });
+  const schemas = await client.listSchemas(BEARER);
+  assert.deepEqual(calls.map(c => [c.method, c.url]), [['GET', `${HOST}/v1/schemas`]]);
+  assert.equal(calls[0].body, undefined, 'a GET carries no body');
+  assert.equal(schemas.length, 2);
+  assert.equal(schemas[0].collection, 'vibe_agents');
+  assert.deepEqual(schemas[0].json_schema, { tables: { agents: {} } });
+  assert.equal(schemas[0].is_active, true);
+});
+test('key-signing: listSchemas signs GET /v1/schemas through the proxy like other key-mode reads - no X-Vibe-Client-Secret header (the whole point of using /v1/schemas, not /v1/enterprise/schemas)', async () => {
+  reply(200, { success: true, data: [] });
+  await client.listSchemas(KEY);
+  const c = calls[0];
+  assert.equal(c.body.endpoint, '/v1/schemas');
+  assert.equal(c.body.method, 'GET');
+  assert.equal(c.body.data, null);
+  assert.equal(c.headers['X-Vibe-Client-Secret'], undefined, 'vsql never sends a client secret - this is the whole point of using /v1/schemas, not /v1/enterprise/schemas');
+});
+
 test('key-signing: rows and collections go through the proxy as signed GETs (read-only, allowed with the secret)', async () => {
   reply(200, { success: true, data: [] });
   reply(200, { success: true, data: [] });
@@ -231,12 +261,139 @@ test('key-signing: rows and collections go through the proxy as signed GETs (rea
   assert.equal(c.headers['X-Vibe-Signature'], expected);
 });
 
+// ── PAY-1975: update / replace / delete a row (measured on the dev-93 twin, rigpert 67270) ────────────────────────────
+test('update: PATCH /v1/collections/{c}/tables/{t}/{id} with the patch as the body, path segments encoded', async () => {
+  reply(200, { success: true, data: { document_id: 41 } });
+  await client.updateDocument(BEARER, 'keelbase demo', 'notes', 41, { city: 'Chennai' });
+  assert.deepEqual(calls.map(c => [c.method, c.url]), [['PATCH', `${HOST}/v1/collections/keelbase%20demo/tables/notes/41`]]);
+  assert.deepEqual(calls[0].body, { city: 'Chennai' });
+  assert.equal(calls[0].headers.Authorization, `Bearer ${JWT}`);
+});
+test('replace: PUT /v1/collections/{c}/tables/{t}/{id} with the whole document as the body', async () => {
+  reply(200, { success: true, data: { document_id: 41 } });
+  await client.replaceDocument(BEARER, 'keelbase_demo', 'notes', 41, { title: 'new', city: 'Chennai' });
+  assert.deepEqual(calls.map(c => [c.method, c.url]), [['PUT', `${HOST}/v1/collections/keelbase_demo/tables/notes/41`]]);
+  assert.deepEqual(calls[0].body, { title: 'new', city: 'Chennai' });
+});
+test('delete: DELETE /v1/collections/{c}/tables/{t}/{id}, a 204 with no body does not throw (readJson would fatal() on an unparseable empty body)', async () => {
+  replyEmpty(204);
+  await client.deleteDocument(BEARER, 'keelbase_demo', 'notes', 41);
+  assert.deepEqual(calls.map(c => [c.method, c.url]), [['DELETE', `${HOST}/v1/collections/keelbase_demo/tables/notes/41`]]);
+  assert.equal(calls[0].body, undefined, 'DELETE carries no body');
+});
+test('delete: a non-204 failure (404 NOT_FOUND) still surfaces the API error, not swallowed as success', async () => {
+  reply(404, { success: false, error: { code: 'NOT_FOUND', message: 'no such row' } });
+  await expectExit(() => client.deleteDocument(BEARER, 'keelbase_demo', 'notes', 999), 'NOT_FOUND');
+});
+test('update/replace/delete: the string id is URL-encoded like collection/table (a UUID-ish id with special chars round-trips)', async () => {
+  reply(200, { success: true, data: {} });
+  await client.updateDocument(BEARER, 'c', 't', 'a/b c', { x: 1 });
+  assert.equal(calls[0].url, `${HOST}/v1/collections/c/tables/t/${encodeURIComponent('a/b c')}`);
+});
+test('key-signing: update/replace/delete are allowed with the secret, through the proxy, with the right method each', async () => {
+  reply(200, { success: true, data: {} });
+  reply(200, { success: true, data: {} });
+  replyEmpty(204);
+  await client.updateDocument(KEY, 'c', 't', 41, { a: 1 });
+  await client.replaceDocument(KEY, 'c', 't', 41, { a: 1 });
+  await client.deleteDocument(KEY, 'c', 't', 41);
+  assert.deepEqual(calls.map(c => [c.body.method, c.body.endpoint, c.body.data]), [
+    ['PATCH', '/v1/collections/c/tables/t/41', { a: 1 }],
+    ['PUT', '/v1/collections/c/tables/t/41', { a: 1 }],
+    ['DELETE', '/v1/collections/c/tables/t/41', null],
+  ]);
+});
+
+// ── PAY-1975 v1.3.2 (Vasanth intake): .env loading, source naming, key-mode query refusal ──────────────────────────
+test('loadDotEnv: reads .env from the given cwd into process.env, and envSource reports it as .env', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
+  writeFileSync(join(dir, '.env'), 'VSQL_TEST_A=hello\nVSQL_TEST_B="quoted value"\n# a comment\n\nVSQL_TEST_C=\'single quoted\'\n');
+  try {
+    loadDotEnv(dir);
+    assert.equal(process.env.VSQL_TEST_A, 'hello');
+    assert.equal(process.env.VSQL_TEST_B, 'quoted value', 'double quotes stripped');
+    assert.equal(process.env.VSQL_TEST_C, 'single quoted', 'single quotes stripped');
+    assert.equal(envSource('VSQL_TEST_A'), '.env');
+  } finally {
+    delete process.env.VSQL_TEST_A; delete process.env.VSQL_TEST_B; delete process.env.VSQL_TEST_C;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('loadDotEnv: NEVER overrides a real env var already set, and envSource reports THAT as env not .env', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
+  writeFileSync(join(dir, '.env'), 'VSQL_TEST_D=from-dotenv\n');
+  process.env.VSQL_TEST_D = 'from-real-env';
+  try {
+    loadDotEnv(dir);
+    assert.equal(process.env.VSQL_TEST_D, 'from-real-env', 'the real env var won, unchanged');
+    assert.equal(envSource('VSQL_TEST_D'), 'env');
+  } finally {
+    delete process.env.VSQL_TEST_D;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('loadDotEnv: a missing .env is not an error; malformed lines are skipped, not fatal', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
+  try {
+    assert.doesNotThrow(() => loadDotEnv(dir)); // no .env at all
+    writeFileSync(join(dir, '.env'), 'not a valid line\n=starts with equals\nVSQL_TEST_E=ok\n123INVALID=nope\n');
+    loadDotEnv(dir);
+    assert.equal(process.env.VSQL_TEST_E, 'ok', 'the one well-formed line still loaded');
+    assert.equal(process.env['123INVALID'], undefined, 'a non-identifier key is skipped');
+  } finally {
+    delete process.env.VSQL_TEST_E;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('describeHealthSource: names key-signing + which var supplied the client id AND the key (env vs .env)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
+  writeFileSync(join(dir, '.env'), `VIBE_CLIENT_ID=${KEY.clientId}\nVIBE_HMAC_KEY=${TEST_SECRET}\n`);
+  try {
+    loadDotEnv(dir);
+    const src = describeHealthSource({});
+    assert.equal(src.mode, 'key-signing');
+    assert.equal(src.clientIdSource, '.env');
+    assert.equal(src.keySource, '.env');
+  } finally {
+    delete process.env.VIBE_CLIENT_ID; delete process.env.VIBE_HMAC_KEY;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('describeHealthSource: MIXED sources (rigpert 67321) - client id and key can come from DIFFERENT places, and must be named separately, not collapsed into one', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-dotenv-'));
+  // Exactly Vasanth's shape: VIBE_CLIENT_ID from the real env, VIBE_HMAC_KEY only in .env.
+  // A DISTINCT client id (not KEY.clientId, which other tests load FROM .env with the same
+  // string) - source is tracked by value, so reusing that constant here would coincidentally
+  // "match" a stale .env-loaded value from an earlier test and mask exactly this class of bug.
+  const REAL_ENV_CLIENT_ID = 'vibe_ffffffffffffffff';
+  writeFileSync(join(dir, '.env'), `VIBE_HMAC_KEY=${TEST_SECRET}\n`);
+  process.env.VIBE_CLIENT_ID = REAL_ENV_CLIENT_ID;
+  try {
+    loadDotEnv(dir);
+    const src = describeHealthSource({});
+    assert.equal(src.clientIdSource, 'env', 'client id came from the real shell env');
+    assert.equal(src.keySource, '.env', 'the key came from .env - a DIFFERENT source');
+  } finally {
+    delete process.env.VIBE_CLIENT_ID; delete process.env.VIBE_HMAC_KEY;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('describeHealthSource: names the host source - flag, VSQL_HOST env, or a named saved profile', () => {
+  assert.equal(describeHealthSource({ host: 'https://x.test' }).hostSource, '--host');
+  process.env.VSQL_HOST = 'https://y.test';
+  try {
+    assert.equal(describeHealthSource({}).hostSource, 'VSQL_HOST (env)');
+  } finally {
+    delete process.env.VSQL_HOST;
+  }
+});
+
 // ── the CLI itself, spawned: exit codes and config show (rigpert 63609) ──────────────────────────────────────────────
-function cli(args, extraEnv = {}) {
+function cli(args, extraEnv = {}, opts = {}) {
   const home = mkdtempSync(join(tmpdir(), 'vsql-home-'));
   const env = { ...saved.env, HOME: home, USERPROFILE: home, ...extraEnv };
   for (const k of ['VIBE_CLIENT_ID', 'VIBE_HMAC_KEY', 'VSQL_DEBUG']) if (!(k in extraEnv)) delete env[k];
-  const r = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/vsql.js', import.meta.url)), ...args], { env, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('../bin/vsql.js', import.meta.url)), ...args], { env, encoding: 'utf8', cwd: opts.cwd });
   rmSync(home, { recursive: true, force: true });
   return r;
 }
@@ -265,4 +422,99 @@ test('cli: an unknown flag fails loud (rigpert 63618: `rows --limit 3` silently 
   assert.equal(cli(['query', '--help']).status, 0, '--help after a command still shows help');
   const ok = cli(['version', '--profile', 'x']);
   assert.equal(ok.status, 0, 'a known flag still works');
+});
+
+// ── PAY-1975 CLI layer: --data validation and delete's non-TTY refusal, no network involved ─────────────────────────
+test('cli: update/replace refuse invalid --data locally, before any request would be made', () => {
+  for (const cmd of ['update', 'replace']) {
+    const r = cli([cmd, 'c', 't', '41', '--data', 'not json']);
+    assert.notEqual(r.status, 0, `${cmd} with bad JSON exits non-zero`);
+    assert.match(r.stderr, /INVALID_JSON/, `${cmd}: ${r.stderr}`);
+  }
+  const arr = cli(['update', 'c', 't', '41', '--data', '[1,2,3]']);
+  assert.notEqual(arr.status, 0);
+  assert.match(arr.stderr, /INVALID_JSON.*JSON object/);
+});
+test('cli: update/replace/delete require collection, table AND id (missing id is not silently treated as the table)', () => {
+  const r = cli(['update', 'c', 't', '--data', '{}']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /MISSING_ARGS/);
+});
+test('cli: delete without --yes, run non-interactively (no TTY), refuses rather than deleting or hanging on an unanswerable prompt', () => {
+  const r = cli(['delete', 'c', 't', '41']);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /CONFIRMATION_REQUIRED/);
+  assert.match(r.stderr, /--yes/);
+  // the alias behaves identically
+  const aliased = cli(['data', 'delete', 'c', 't', '41']);
+  assert.notEqual(aliased.status, 0);
+  assert.match(aliased.stderr, /CONFIRMATION_REQUIRED/);
+});
+test('cli: `data update|replace|delete` are aliases - same validation as the bare commands', () => {
+  const badJson = cli(['data', 'update', 'c', 't', '41', '--data', 'nope']);
+  assert.notEqual(badJson.status, 0);
+  assert.match(badJson.stderr, /INVALID_JSON/);
+  const unknownSub = cli(['data', 'wat', 'c', 't', '41']);
+  assert.notEqual(unknownSub.status, 0);
+  assert.match(unknownSub.stderr, /UNKNOWN_COMMAND.*data wat/);
+  const noSub = cli(['data']);
+  assert.notEqual(noSub.status, 0);
+  assert.match(noSub.stderr, /UNKNOWN_COMMAND/);
+});
+
+// ── PAY-1975 v1.3.2 CLI-level: key-mode query refusal, and .env picked up from cwd ───────────────────────────────────
+test('cli: `query` with a KeelBase secret refuses LOCALLY with the sign-in hint - nothing is sent', () => {
+  const r = cli(['query', 'select 1'], { VIBE_CLIENT_ID: 'vibe_25c8bbf4cd37c521', VIBE_HMAC_KEY: TEST_SECRET, VSQL_IDP_URL: 'https://idp.test' });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /NOT_WITH_KEELBASE_SECRET/);
+  assert.match(r.stderr, /vsql login/);
+  assert.doesNotMatch(r.stderr, /RAW_SQL_PLATFORM_ADMIN_ONLY/, 'refused before any request - never the server error');
+});
+test('cli: a .env file in the working directory is picked up - config show reports key-signing from a value ONLY in .env', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-cwd-'));
+  try {
+    writeFileSync(join(dir, '.env'), 'VIBE_CLIENT_ID=vibe_25c8bbf4cd37c521\nVIBE_HMAC_KEY=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n');
+    // config show reads the key vars directly from process.env, which loadDotEnv() populates before
+    // any command runs - so a value that ONLY exists in .env (never passed via extraEnv) still shows.
+    const r = cli(['config', 'show'], {}, { cwd: dir });
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /key-signing/, `.env was not picked up: ${r.stdout} / ${r.stderr}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('cli: a real env var still wins over a conflicting .env value in the same directory', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-cwd-'));
+  try {
+    writeFileSync(join(dir, '.env'), 'VSQL_HOST=http://127.0.0.1:2\n');
+    const r = cli(['health'], { VSQL_HOST: 'http://127.0.0.1:1' }, { cwd: dir });
+    assert.match(r.stderr, /127\.0\.0\.1:1/, `real env var should have won: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /127\.0\.0\.1:2/, 'the .env value must not have been used');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+test('cli: `health` names its mode/host/key-source line to stderr before making the request', () => {
+  const r = cli(['health'], { VSQL_HOST: 'http://127.0.0.1:1' });
+  assert.match(r.stderr, /mode: anonymous \(host from VSQL_HOST \(env\)\)/, r.stderr);
+});
+test('cli: `health` in key mode names the client-id source AND the key source SEPARATELY (rigpert 67321 MUST - the mixed-source case)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'vsql-cwd-'));
+  try {
+    writeFileSync(join(dir, '.env'), `VIBE_HMAC_KEY=${TEST_SECRET}\n`);
+    // VIBE_CLIENT_ID from the real env, VIBE_HMAC_KEY only from .env - exactly Vasanth's shape.
+    const r = cli(['health'], { VIBE_CLIENT_ID: KEY.clientId, VSQL_IDP_URL: 'http://127.0.0.1:1' }, { cwd: dir });
+    assert.match(r.stderr, /client id from env, key from \.env/, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── PAY-1978 CLI-level: `tables --schema` refused locally, before any auth/network attempt ──────────────────────────
+test('cli: `tables --schema` is refused locally (the information_schema framing is gone) - no auth/network is even attempted', () => {
+  const r = cli(['tables', '--schema', 'public']); // no VIBE_CLIENT_ID/HMAC_KEY, no profile - would otherwise fail on auth first
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /SCHEMA_FLAG_REMOVED/);
+  assert.match(r.stderr, /vsql schemas/);
+  assert.doesNotMatch(r.stderr, /NO_SESSION|NO_HOST/, 'refused before reaching auth resolution');
 });

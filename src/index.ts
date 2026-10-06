@@ -4,6 +4,7 @@ import * as client from './client.js';
 import {
   resolveConn,
   resolveHealthConn,
+  describeHealthSource,
   getProfile,
   setProfileHost,
   saveProfile,
@@ -14,12 +15,26 @@ import {
   idpBase,
   clientId,
   deviceId,
+  loadDotEnv,
   type Profile,
 } from './config.js';
 import { formatRows, detectFormat, type Format } from './format.js';
 import { fatal } from './errors.js';
+import { createRequire } from 'node:module';
 
-const VERSION = '1.3.0';
+/**
+ * PAY-1814: read the version from package.json, do NOT hardcode it. The 1.4.0 pack shipped
+ * `const VERSION = '1.3.0'` while package.json said 1.4.0, so `vsql version` reported 1.3.0 - a
+ * provenance gap where the only thing a tester can ask the binary (what are you?) answered wrong.
+ * package.json is one directory above dist/, and it is included in the npm pack.
+ */
+const VERSION: string = (() => {
+  try {
+    return (createRequire(import.meta.url)('../package.json') as { version?: string }).version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 interface Flags {
   host?: string;
@@ -80,6 +95,41 @@ async function prompt(question: string): Promise<string> {
   return new Promise(resolve => {
     rl.question(question, answer => { rl.close(); resolve(answer.trim()); });
   });
+}
+
+/**
+ * PAY-1975: parse a --data payload for a single-row write. Reject invalid JSON locally, with the
+ * offending text and the parser's own message, rather than letting a malformed body reach the
+ * server half-parsed (or, worse, sent as a literal string).
+ */
+function parseDataFlag(raw: string, usage: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    fatal('INVALID_JSON', `--data is not valid JSON: ${(err as Error).message}`, usage);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    fatal('INVALID_JSON', '--data must be a JSON object, e.g. \'{"key":"value"}\'.', usage);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * PAY-1975 delete safety: a TTY prompts for confirmation (`--yes` skips it); a non-TTY without
+ * `--yes` refuses outright, so a hackathon script piping into `vsql delete` can't delete by
+ * accident just because nothing was there to answer a prompt it never saw. Returns false (and
+ * prints why) on anything short of an explicit "yes" - the caller `break`s rather than deleting,
+ * the same cancel idiom `rollback` and `schema update` already use.
+ */
+async function confirmDelete(collection: string, table: string, id: string, flags: Flags): Promise<boolean> {
+  if (flags.yes) return true;
+  if (!process.stdin.isTTY) {
+    fatal('CONFIRMATION_REQUIRED', `Refusing to delete ${collection}.${table} id=${id} without confirmation.`, 'Pass --yes to delete without a prompt (non-interactive).');
+  }
+  const answer = await prompt(`Delete ${collection}.${table} id=${id}? Type "yes" to confirm: `);
+  if (answer !== 'yes') { console.log('Delete cancelled.'); return false; }
+  return true;
 }
 
 function getTableNames(schema: unknown): string[] {
@@ -327,6 +377,11 @@ async function loginPasswordless(profileName: string, emailArg?: string): Promis
 }
 
 async function run(): Promise<void> {
+  // PAY-1975 v1.3.2 (Vasanth intake, flaw 3): before anything else reads an env var, load .env
+  // from the CURRENT DIRECTORY. Must run before parseArgs/resolveConn/idpBase/clientId — all of
+  // which read process.env directly — so it is the very first statement in run().
+  loadDotEnv();
+
   const args = process.argv.slice(2);
   const { command, positionals, flags } = parseArgs(args);
   const positional = positionals[0] ?? '';
@@ -334,6 +389,7 @@ async function run(): Promise<void> {
   switch (command) {
     case 'query': {
       const conn = await resolveConn(flags);
+      client.refuseQueryWithKey(conn);
       let sql = positional;
       if (flags.file) sql = readFileSync(flags.file, 'utf-8').trim();
       if (!sql) fatal('NO_QUERY', 'No SQL provided.', 'Pass SQL as argument or use --file.');
@@ -346,13 +402,41 @@ async function run(): Promise<void> {
     }
 
     case 'tables': {
+      // PAY-1978 (Jon-ruled): information_schema.tables 403s for tenant keys on prod - the raw
+      // query path is platform-admin-only. Tables now come from the Vibe-native GET /v1/schemas
+      // (client.listSchemas), the same source `schemas` uses. --schema no longer means anything
+      // here (there is no Postgres schema namespace to pick) - refuse it locally rather than
+      // silently ignore it.
+      if (flags.schema) fatal('SCHEMA_FLAG_REMOVED', '--schema is not used by `tables` any more.', 'Run `vsql schemas` to see every collection and its schema.');
       const conn = await resolveConn(flags);
-      const schema = flags.schema ?? 'public';
-      const sql = `SELECT table_name FROM information_schema.tables WHERE table_schema = '${schema}' ORDER BY table_name`;
-      const result = await client.query(conn, sql);
-      const rows = result.data ?? result.rows ?? [];
-      const format = detectFormat(flags.format);
-      console.log(formatRows(rows, format));
+      const schemas = await client.listSchemas(conn);
+      const active = schemas.filter(s => s.is_active);
+      if (positional) {
+        const match = active.find(s => s.collection === positional);
+        if (!match) fatal('COLLECTION_NOT_FOUND', `No active schema for collection "${positional}".`, 'Run `vsql schemas` to see what exists.');
+        const tables = getTableNames(match.json_schema);
+        if (tables.length === 0) { console.log(`${positional}: no tables.`); break; }
+        console.log(formatRows(tables.map(t => ({ table: t })), detectFormat(flags.format)));
+      } else {
+        if (active.length === 0) { console.log('No collections.'); break; }
+        for (const s of active) {
+          const tables = getTableNames(s.json_schema);
+          console.log(`${s.collection}: ${tables.length === 0 ? '(no tables)' : tables.join(', ')}`);
+        }
+      }
+      break;
+    }
+
+    case 'schemas': {
+      // PAY-1978 (Jon-ruled): every collection and its active schema, including ones with no
+      // documents yet - `collections` only lists collections that have some.
+      const conn = await resolveConn(flags);
+      const schemas = (await client.listSchemas(conn)).filter(s => s.is_active);
+      if (schemas.length === 0) { console.log('No collections.'); break; }
+      console.log(formatRows(
+        schemas.map(s => ({ collection: s.collection, version: s.version, tables: getTableNames(s.json_schema).length, created_at: s.created_at })),
+        detectFormat(flags.format),
+      ));
       break;
     }
 
@@ -530,6 +614,72 @@ async function run(): Promise<void> {
       break;
     }
 
+    // PAY-1975: row update/replace/delete on /v1/collections/{c}/tables/{t}/{id}. `data update|replace|delete`
+    // (below, the 1.1.1 spelling) are aliases of these three - same args, same behavior.
+    case 'update':
+    case 'replace': {
+      const collection = positional;
+      const table = positionals[1];
+      const id = positionals[2];
+      const usage = `Usage: vsql ${command} <collection> <table> <id> --data '{"key":"value"}'`;
+      if (!collection || !table || !id) fatal('MISSING_ARGS', 'Collection, table and id required.', usage);
+      if (!flags.data) fatal('NO_DATA', 'No data provided.', usage);
+      const doc = parseDataFlag(flags.data, usage);
+      const conn = await resolveConn(flags);
+      if (command === 'update') {
+        await client.updateDocument(conn, collection, table, id, doc);
+        console.log(`Updated ${collection}.${table} id=${id}.`);
+      } else {
+        await client.replaceDocument(conn, collection, table, id, doc);
+        console.log(`Replaced ${collection}.${table} id=${id}.`);
+      }
+      break;
+    }
+
+    case 'delete': {
+      const collection = positional;
+      const table = positionals[1];
+      const id = positionals[2];
+      if (!collection || !table || !id) fatal('MISSING_ARGS', 'Collection, table and id required.', 'Usage: vsql delete <collection> <table> <id> [--yes]');
+      if (!(await confirmDelete(collection, table, id, flags))) break;
+      const conn = await resolveConn(flags);
+      await client.deleteDocument(conn, collection, table, id);
+      console.log(`Deleted ${collection}.${table} id=${id}.`);
+      break;
+    }
+
+    // 1.1.1 compatibility: `vsql data update|replace|delete <collection> <table> <id> ...` - the ADO CLI's spelling,
+    // kept so those docs/scripts still work. Same args, same behavior as the bare commands above.
+    case 'data': {
+      const sub = positional;
+      if (sub !== 'update' && sub !== 'replace' && sub !== 'delete') {
+        fatal('UNKNOWN_COMMAND', sub ? `Unknown command "data ${sub}".` : '`vsql data` needs a subcommand.', 'Usage: vsql data <update|replace|delete> <collection> <table> <id> ...');
+      }
+      const collection = positionals[1];
+      const table = positionals[2];
+      const id = positionals[3];
+      const usage = `Usage: vsql data ${sub} <collection> <table> <id>${sub === 'delete' ? ' [--yes]' : ` --data '{"key":"value"}'`}`;
+      if (!collection || !table || !id) fatal('MISSING_ARGS', 'Collection, table and id required.', usage);
+      if (sub === 'delete') {
+        if (!(await confirmDelete(collection, table, id, flags))) break;
+        const conn = await resolveConn(flags);
+        await client.deleteDocument(conn, collection, table, id);
+        console.log(`Deleted ${collection}.${table} id=${id}.`);
+        break;
+      }
+      if (!flags.data) fatal('NO_DATA', 'No data provided.', usage);
+      const doc = parseDataFlag(flags.data, usage);
+      const conn = await resolveConn(flags);
+      if (sub === 'update') {
+        await client.updateDocument(conn, collection, table, id, doc);
+        console.log(`Updated ${collection}.${table} id=${id}.`);
+      } else {
+        await client.replaceDocument(conn, collection, table, id, doc);
+        console.log(`Replaced ${collection}.${table} id=${id}.`);
+      }
+      break;
+    }
+
     case 'login': {
       const profile = flags.profile ?? 'default';
       // --host is honored so the same login can target a non-default host.
@@ -577,10 +727,22 @@ async function run(): Promise<void> {
     }
 
     case 'health': {
+      // PAY-1975 v1.3.2 (Vasanth intake, flaws 3+4): name the mode, host and credential SOURCE
+      // (never the value) BEFORE the request - a stale saved profile or a shadowing env var is
+      // then visible immediately, rather than reading as "healthy" for the wrong server.
+      const src = describeHealthSource(flags);
       const conn = resolveHealthConn(flags);
-      const result = await client.health(conn);
       const target = conn.kind === 'key' ? `${conn.idp} (KeelBase ${conn.clientId})` : conn.host;
       const hostname = target.replace(/^https?:\/\//, '');
+      // PAY-1978 MUST (rigpert 67321): name the client id's source and the key's source
+      // SEPARATELY - they can differ (a Windows user-level VIBE_HMAC_KEY beating the shell's
+      // while VIBE_CLIENT_ID still comes from the shell, exactly what bit Vasanth). A single
+      // combined source hides a mismatch between the two.
+      const modeLine = conn.kind === 'key'
+        ? `mode: key-signing (client id from ${src.clientIdSource ?? 'env'}, key from ${src.keySource ?? 'env'})`
+        : `mode: ${src.mode} (host from ${src.hostSource})`;
+      console.error(modeLine);
+      const result = await client.health(conn);
       const ver = result.version ? `, ${result.version}` : '';
       console.log(`${hostname}: ${result.status} (${result.latencyMs}ms${ver})`);
       break;
@@ -612,12 +774,16 @@ Usage: vsql <command> [options]
 Commands:
   login                    Authenticate via IDP (device-code by default)
   logout                   Clear stored tokens from the profile
-  query <sql>              Execute a SQL query
-  tables                   List all tables
+  query <sql>              Execute a SQL query (sign-in only)
+  tables [collection]      List tables - one collection's, or all grouped by collection
+  schemas                  List every collection and its active schema (including empty ones)
   describe <table>         Show column details for a table
   schema show <collection> Dump active JSON schema
   schema update <col>      Push schema from file
   insert <col> <table>     Insert documents
+  update <col> <table> <id>   Merge-update a document (PATCH); alias: data update
+  replace <col> <table> <id>  Whole-document replace (PUT); alias: data replace
+  delete <col> <table> <id>   Delete a document; alias: data delete
   rows <col> <table>       Read a table's rows back (--page, --page-size)
   collections              List your collections (those with documents)
   rollback <collection>    Roll back a schema collection
@@ -632,7 +798,7 @@ Options:
   --email <email>       Alias for --passwordless (with login)
   --format <fmt>        Output format: table, json, csv, raw
   --file <path>         Read SQL/schema/doc from a file
-  --data <json>         Inline JSON for insert
+  --data <json>         Inline JSON for insert/update/replace
   --batch               Insert each element of a JSON array
   --page <n>            Page of rows to read (rows; default 1)
   --page-size <n>       Rows per page (rows; default 20)
@@ -649,17 +815,23 @@ Environment:
   VSQL_DEBUG            Set to 1 to print each request's target to stderr (never a credential)
 
 Key-signing (VIBE_CLIENT_ID + VIBE_HMAC_KEY set): calls go through the identity service
-(VSQL_IDP_URL) signed with your KeelBase secret. It covers query, health, rows, collections,
-schema show, rollback --list and insert. Schema changes (schema update, rollback) use your sign-in:
-run \`vsql login\` with the two variables unset.
+(VSQL_IDP_URL) signed with your KeelBase secret. It covers health, tables, schemas, rows,
+collections, schema show, rollback --list, insert, update, replace and delete. query and schema
+CHANGES (schema update, rollback) use your sign-in: run \`vsql login\` with the two variables unset.
 
 Examples:
   vsql login
   vsql login --passwordless you@example.com
   vsql query "SELECT * FROM users LIMIT 5"
+  vsql schemas
+  vsql tables
+  vsql tables vibe_agents
   vsql schema show vibe_agents
   vsql schema update vibe_agents --file schema.json
   vsql insert vibe_agents agents --file agent.json
+  vsql update vibe_agents agents 243791 --data '{"city":"Chennai"}'
+  vsql replace vibe_agents agents 243791 --data '{"city":"Chennai","name":"..."}'
+  vsql delete vibe_agents agents 243791 --yes
   vsql rows vibe_agents agents --page-size 5
   vsql rollback my_schema --list`);
 }

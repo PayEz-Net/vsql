@@ -1,9 +1,33 @@
 # Changelog
 
-## Unreleased
+## 1.3.3 — 2026-09-29
+
+PAY-1978 (Jon-ruled, from the Vasanth intake `E:/Repos/Agents/jon.ranes/releases/v086-intake-vasanth-first-tester-2026-09-29.md`, flaws 1-4). One release for everything the first external tester hit, on top of v1.3.1 — plus PAY-1814, the `KEELBASE_CLIENT_ID` rename (rigpert 67421: the rename must ship with this line, not as a separate 1.4.0).
+
+### Added
+- **`vsql schemas`** — every collection and its active schema, including ones with no documents yet (`collections` only shows ones that have some). **`vsql tables [collection]`** — a collection's tables, or with no argument every table grouped by collection. Both read `GET /v1/schemas` (bare), NOT `/v1/enterprise/schemas`: that route requires an `X-Vibe-Client-Secret` vsql's key mode never sends and would 401. `GET /v1/schemas` is HMAC-only, the same posture `insert`/`collections` already use, and works with a KeelBase secret. `tables` no longer reads `information_schema`, which 403'd for every tenant key on prod — that was the actual bug Vasanth hit. Its old `--schema <name>` flag (a Postgres schema namespace) no longer applies and is refused locally with a pointer to `vsql schemas`.
+- **`.env` loading.** `vsql` now reads a `.env` file from the CURRENT WORKING DIRECTORY (not the install location) before any command runs. A real environment variable already set is NEVER overridden by a `.env` value — the real one silently wins, by design. Missing/unreadable `.env` is not an error; malformed lines are skipped, not fatal.
+- **`vsql health` names its sources.** Prints, to stderr, the mode (`key-signing`, `sign-in` or `anonymous`), the host it checked, and where each came from: `--host`, `VSQL_HOST` (env or `.env`), a named saved profile, or (for the key pair) `env`/`.env` — never the credential VALUE. Closes two silent-failure shapes measured on Vasanth's machine: a Windows user-level `VIBE_HMAC_KEY` silently beating the shell's value, and `health` falling back to an old saved profile and reporting "healthy" for a different server with no indication it had done so.
+- **Key-mode `query` refuses locally, with the sign-in hint.** The KeelBase secret is the *application's* identity; `query` and schema changes are attributed to a *person*, so they run on your sign-in (Jon's design ruling). With a KeelBase secret set, `vsql query` now refuses before sending anything (`NOT_WITH_KEELBASE_SECRET`, the same hint DDL already gives) instead of reaching the server and getting back `RAW_SQL_PLATFORM_ADMIN_ONLY`, which read like a permissions bug rather than "wrong mode for this command."
 
 ### Changed
+- README: `query` and schema-changing commands moved out of the key-signing "covers" list into the sign-in-only list (they were never actually reachable with a key on the hosted API; the README just hadn't caught up). Reading a schema (`schema show`, `rollback --list`) stays key-signable, since it's a read, not a change.
 - **`KEELBASE_CLIENT_ID` replaces `VSQL_CLIENT_ID` as the client the CLI signs in on** (PAY-1814). Its value is your **Tenant** — the name your KeelBase page shows as "Tenant" — not your KeelBase client id (the `vibe_...` signing credential). `VSQL_CLIENT_ID` is still read as a **deprecated fallback**, with one warning, so existing `.env` files keep working. If both are set to **different** values the CLI refuses rather than guess; if neither is set it fails loud, as before.
+
+## 1.3.1 — 2026-09-29
+
+PAY-1975 (Vasanth's hackathon, Jon, today): v1.3.0 had `insert` but no way to update or delete a
+row. The server always supported it (measured on the dev-93 twin: `PATCH .../{id}` → 200,
+`DELETE .../{id}` → 204, read-back confirms both); the CLI just never carried the commands
+forward from the old ADO vsql-cli 1.1.1.
+
+### Added
+- **`vsql update <collection> <table> <id> --data '{...}'`** — merge-update a document, `PATCH /v1/collections/{c}/tables/{t}/{id}`.
+- **`vsql replace <collection> <table> <id> --data '{...}'`** — whole-document replace, `PUT` on the same path.
+- **`vsql delete <collection> <table> <id>`** — delete a document, `DELETE` on the same path. Prompts for confirmation on a TTY; `--yes` skips the prompt; a non-TTY call without `--yes` refuses outright rather than deleting silently or hanging on a prompt nothing can answer.
+- `data update|replace|delete` are kept as aliases of the three commands above, matching the 1.1.1 spelling, so existing docs/scripts using it still work.
+- All three are covered by key-signing (a KeelBase secret), the same as `insert` — row writes are app runtime, not a schema change.
+- `--data` is validated locally before any request is sent: invalid JSON, or JSON that isn't a plain object, fails with `INVALID_JSON` rather than reaching the server half-parsed.
 
 ## 1.3.0 — 2026-09-23
 

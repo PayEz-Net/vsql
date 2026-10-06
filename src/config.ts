@@ -73,18 +73,75 @@ export function resolveClientId(env: Record<string, string | undefined>): Client
 
 // Emit the deprecation warning at most ONCE per process, however many times clientId() is called.
 let warnedLegacyClientId = false;
+
 // IDP device-context enum — server-validated CLOSED set: 'vibe_agents_no_acp'
 // = a CLI running OUTSIDE ACP (this CLI's case); 'vibe_agents_acp' = within
 // ACP. A REQUIRED contract value stamped into the token, NOT a per-device id
 // or secret — a free-form/UUID value is rejected (400 VALIDATION_ERROR).
 const DEVICE_ID = 'vibe_agents_no_acp';
 
+/**
+ * PAY-1975 v1.3.2 (Vasanth intake, flaw 3): names FOR EACH env var whether the process picked it
+ * up from the real shell environment, from a loaded `.env` file, or (for the key pair) from
+ * neither. Populated by `loadDotEnv()`; read by `health`/`config show` to name a value's SOURCE —
+ * never the value itself. `envSource()` below is the one place that answers "where did this
+ * come from", so `.env`-loading and reporting can't drift apart.
+ *
+ * Tracked by VALUE, not just key presence: `envSource(name)` reports '.env' only when
+ * process.env[name] STILL EQUALS the value loadDotEnv() set. A bare key->loaded Set would go
+ * stale the moment something else (a later real env var, a test) sets the SAME NAME to a
+ * DIFFERENT value without going through loadDotEnv again — reporting '.env' would then be wrong.
+ */
+const DOTENV_VALUES = new Map<string, string>();
+
+/** Which of ('env' | '.env' | undefined) supplied `name` in process.env right now. Never returns the value. */
+export function envSource(name: string): 'env' | '.env' | undefined {
+  const current = process.env[name];
+  if (current === undefined) return undefined;
+  return DOTENV_VALUES.get(name) === current ? '.env' : 'env';
+}
+
+/**
+ * PAY-1975 v1.3.2 (Vasanth intake, flaw 3): load a `.env` file from the CURRENT WORKING DIRECTORY
+ * (not the CLI's install location) into process.env, WITHOUT EVER overriding a real environment
+ * variable that is already set — a real env var always wins, silently, by design (a developer who
+ * exports VIBE_HMAC_KEY in their shell for one call should not have a stale .env value win instead).
+ * Missing/unreadable .env is not an error: most invocations have none. Malformed lines are skipped,
+ * not fatal — a typo in an unrelated line must not block every command.
+ */
+export function loadDotEnv(cwd: string = process.cwd()): void {
+  const path = join(cwd, '.env');
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf-8');
+  } catch {
+    return; // no .env — the common case, not an error
+  }
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eq = line.indexOf('=');
+    if (eq <= 0) continue; // no '=', or a line starting with '=' — not KEY=VALUE, skip rather than fatal
+    const key = line.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue; // not a shell-legal identifier — skip
+    let value = line.slice(eq + 1).trim();
+    // Strip one layer of matching quotes, same convention as `.env` files elsewhere in this repo.
+    if (value.length >= 2 && ((value[0] === '"' && value.endsWith('"')) || (value[0] === "'" && value.endsWith("'")))) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] !== undefined) continue; // a real env var already set it — never override
+    process.env[key] = value;
+    DOTENV_VALUES.set(key, value);
+  }
+}
+
 /** Returns the configured IDP base URL, or fails loud if VSQL_IDP_URL is unset. */
 export function idpBase(): string {
-  if (!IDP_BASE) {
+  const idpBase = process.env.VSQL_IDP_URL;
+  if (!idpBase) {
     fatal('NO_IDP_URL', 'Missing VSQL_IDP_URL environment variable.', 'Set VSQL_IDP_URL to your IDP base URL (e.g. https://idp.payez.net).');
   }
-  return IDP_BASE;
+  return idpBase;
 }
 
 /**
@@ -374,4 +431,39 @@ export function resolveHost(flags: { host?: string; profile?: string }): string 
     fatal('NO_HOST', 'No host configured.', 'Pass --host, set VSQL_HOST, or run `vsql login`. Refusing to silently hit localhost.');
   }
   return host;
+}
+
+/**
+ * PAY-1975 v1.3.2 (Vasanth intake, flaws 3+4): names WHERE `health` got its mode, host and
+ * credential from - never the credential value itself. This is what makes a stale saved profile
+ * or a shadowing env var visible instead of silently answering "healthy" for the wrong server.
+ */
+export interface HealthSource {
+  mode: 'key-signing' | 'sign-in' | 'anonymous';
+  /**
+   * Where VIBE_CLIENT_ID and VIBE_HMAC_KEY each came from, in key-signing mode - SEPARATELY.
+   * PAY-1978 MUST (rigpert 67321): the id and the key can come from DIFFERENT sources at once -
+   * that mixed-source case is exactly what bit Vasanth (a Windows user-level VIBE_HMAC_KEY
+   * beating the shell's, while VIBE_CLIENT_ID still came from the shell). Reporting only one
+   * combined source hides that; the two must be named independently.
+   */
+  clientIdSource?: 'env' | '.env';
+  keySource?: 'env' | '.env';
+  /** Where the host came from: the flag, an env var (real or .env), or a named saved profile. */
+  hostSource: '--host' | 'VSQL_HOST (env)' | 'VSQL_HOST (.env)' | `profile "${string}"` | 'none';
+}
+
+export function describeHealthSource(flags: { host?: string; profile?: string }): HealthSource {
+  const key = process.env.VIBE_CLIENT_ID?.trim() && process.env.VIBE_HMAC_KEY?.trim();
+  if (key && !flags.host) {
+    return { mode: 'key-signing', clientIdSource: envSource('VIBE_CLIENT_ID'), keySource: envSource('VIBE_HMAC_KEY'), hostSource: 'none' };
+  }
+  const profileName = flags.profile ?? 'default';
+  const profile = getProfile(profileName);
+  let hostSource: HealthSource['hostSource'];
+  if (flags.host) hostSource = '--host';
+  else if (process.env.VSQL_HOST !== undefined) hostSource = envSource('VSQL_HOST') === '.env' ? 'VSQL_HOST (.env)' : 'VSQL_HOST (env)';
+  else if (profile.host) hostSource = `profile "${profileName}"`;
+  else hostSource = 'none';
+  return { mode: profile.access_token ? 'sign-in' : 'anonymous', hostSource };
 }

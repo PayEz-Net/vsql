@@ -64,9 +64,24 @@ function debug(line: string): void {
 const DDL_WITH_KEY_HINT =
   'Schema changes use your sign-in, not a KeelBase secret: unset VIBE_CLIENT_ID / VIBE_HMAC_KEY and run `vsql login`.';
 
+/** query's own hint (rigpert 67321 NIT): "schema changes" alone reads wrong for a plain SELECT. */
+const QUERY_WITH_KEY_HINT =
+  'Queries and schema changes use your sign-in, not a KeelBase secret: unset VIBE_CLIENT_ID / VIBE_HMAC_KEY and run `vsql login`.';
+
 /** Refuse a schema change up front when the connection is a KeelBase secret - before any diff or confirmation prompt. */
 export function refuseDdlWithKey(conn: Conn, op: string): void {
   if (conn.kind === 'key') fatal('NOT_WITH_KEELBASE_SECRET', `\`${op}\` is not available with a KeelBase secret.`, DDL_WITH_KEY_HINT);
+}
+
+/**
+ * PAY-1975 v1.3.2 (Vasanth intake, flaw 2; Jon's design ruling): the KeelBase key is the
+ * APPLICATION's identity. `query` and DDL run on the developer's own sign-in so they are
+ * attributed to a person, not the app. Refuse LOCALLY with the sign-in hint, before the request -
+ * today the server sends it anyway and answers RAW_SQL_PLATFORM_ADMIN_ONLY, which reads like a
+ * permissions bug rather than "wrong mode for this command."
+ */
+export function refuseQueryWithKey(conn: Conn): void {
+  if (conn.kind === 'key') fatal('NOT_WITH_KEELBASE_SECRET', '`query` is not available with a KeelBase secret.', QUERY_WITH_KEY_HINT);
 }
 
 /**
@@ -176,6 +191,21 @@ export async function getVersions(conn: Conn, collection: string): Promise<Schem
   return ((body.data as Record<string, unknown>[] | undefined) ?? []).map(toVersion);
 }
 
+/**
+ * PAY-1978 (Jon-ruled design, BAPert 67301): every collection's ACTIVE schema, in ONE call - the
+ * basis for `vsql schemas` and the rewritten `vsql tables`. GET /v1/schemas (bare, NOT
+ * /v1/enterprise/schemas): that route requires X-Vibe-Client-Secret at the middleware layer
+ * (VibeClientAuthMiddleware.cs EnterprisePrefixes), which vsql's key mode never sends - it would
+ * 401. This one is under AdminPrefixes, HMAC-only, the same posture `insert`/`collections`
+ * already use. Includes collections with NO documents yet (unlike `collections`, which only
+ * lists ones that have some) - closes that gap too.
+ */
+export async function listSchemas(conn: Conn): Promise<SchemaVersion[]> {
+  const res = await send(conn, 'schemas', 'GET', '/v1/schemas');
+  const body = await expectOk(res);
+  return ((body.data as Record<string, unknown>[] | undefined) ?? []).map(toVersion);
+}
+
 export async function getActiveSchema(conn: Conn, collection: string): Promise<{ version: number; schema: unknown; created_at: string }> {
   const versions = await getVersions(conn, collection);
   const active = versions.find(v => v.is_active);
@@ -201,6 +231,43 @@ export async function insertDocument(conn: Conn, collection: string, table: stri
   const data = (body.data ?? {}) as Record<string, unknown>;
   const id = data.document_id ?? data.documentId ?? data.id;
   return { id: typeof id === 'number' ? id : undefined };
+}
+
+/** The row path a single document lives at: /v1/collections/{c}/tables/{t}/{id}, every segment encoded. */
+function documentPath(collection: string, table: string, id: string | number): string {
+  return `/v1/collections/${encodeURIComponent(collection)}/tables/${encodeURIComponent(table)}/${encodeURIComponent(String(id))}`;
+}
+
+/**
+ * PAY-1975: merge-update a document. PATCH /v1/collections/{c}/tables/{t}/{id}, measured 200 on the dev-93 twin
+ * (rigpert 67270, client 45). Row writes are app runtime, so a KeelBase secret may do this, same as insert.
+ */
+export async function updateDocument(conn: Conn, collection: string, table: string, id: string | number, patch: Record<string, unknown>): Promise<void> {
+  const res = await send(conn, 'update', 'PATCH', documentPath(collection, table, id), { body: patch });
+  await expectOk(res);
+}
+
+/**
+ * PAY-1975: whole-document replace. PUT /v1/collections/{c}/tables/{t}/{id}. Same auth/idempotency posture as update:
+ * a KeelBase secret may call it, and calling it twice with the same body leaves the row in the same state.
+ */
+export async function replaceDocument(conn: Conn, collection: string, table: string, id: string | number, doc: Record<string, unknown>): Promise<void> {
+  const res = await send(conn, 'replace', 'PUT', documentPath(collection, table, id), { body: doc });
+  await expectOk(res);
+}
+
+/**
+ * PAY-1975: delete a document. DELETE /v1/collections/{c}/tables/{t}/{id}, measured 204 on the dev-93 twin
+ * (rigpert 67270) with the read-back then 404. The CLI layer (index.ts) is where the confirmation prompt /
+ * --yes / non-TTY refusal lives — this function does the call only, once the caller has decided to make it.
+ */
+export async function deleteDocument(conn: Conn, collection: string, table: string, id: string | number): Promise<void> {
+  const res = await send(conn, 'delete', 'DELETE', documentPath(collection, table, id));
+  // A DELETE reply can be a 204 with no body at all - readJson/expectOk already handle an empty body as long as the
+  // status is 2xx, but expectOk calls readJson which fatal()s on a non-JSON body. 204 has no body to parse, so
+  // handle it directly rather than forcing an empty response through the JSON path.
+  if (res.status === 204) return;
+  await expectOk(res);
 }
 
 /**
