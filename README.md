@@ -24,7 +24,7 @@ To build from source instead: `git clone https://github.com/PayEz-Net/vsql.git &
 | For | Use | Covers |
 |-----|-----|--------|
 | **You, at the terminal: schemas, DDL, admin, ad-hoc queries** | Your **sign-in** (`vsql login`, device code). The primary path. | every command |
-| **An app's runtime calls** (a test app, a script, a service) | Your **KeelBase client id + KeelBase secret** from the KeelBase page | `health`, `tables`, `schemas`, `collections`, `rows`, `schema show`, `rollback --list`, `insert`, `update`, `replace`, `delete` |
+| **An app's runtime calls** (a test app, a script, a service) | Your **KeelBase client id + KeelBase secret** from the KeelBase page | `health`, `tables`, `schemas`, `collections`, `rows`, `describe`, `schema show`, `rollback --list`, `insert`, `update`, `replace`, `delete` |
 
 `query`, and anything that CHANGES a schema (`schema update`, `rollback`), always use your sign-in: with a KeelBase secret set they are refused locally, with a hint pointing you at `vsql login`, and nothing is sent. Reading a schema (`schema show`, `rollback --list`) is data access, not a change, so it still works with the key. This is by design (not a permissions bug) — the KeelBase secret is the *application's* identity; queries and schema changes are attributed to a *person*, so they run on your sign-in.
 
@@ -69,7 +69,7 @@ vsql collections                             # your collections
 vsql rows vibe_agents agents                 # read a table's rows back
 ```
 
-Key-signing covers `health`, `tables`, `schemas`, `collections`, `rows`, `schema show`, `rollback --list`, `insert`, `update`, `replace` and `delete`. `query` and schema CHANGES (`schema update`, `rollback`) use your sign-in.
+Key-signing covers `health`, `tables`, `schemas`, `describe`, `collections`, `rows`, `schema show`, `rollback --list`, `insert`, `update`, `replace` and `delete`. `query` and schema CHANGES (`schema update`, `rollback`) use your sign-in.
 
 With both variables set, every call goes through the identity service's proxy (`POST {IdP}/api/vibe/proxy`), signed `base64(HMAC-SHA256(base64decode(secret), "{unix seconds}|{METHOD}|{endpoint}"))`. What to know:
 
@@ -90,7 +90,7 @@ vsql query "SELECT * FROM notes" --format json
 vsql query --file ./reports/monthly.sql
 ```
 
-The hosted query endpoint is **read-only for tenant data** until row-level security lands. Row writes go through `vsql insert` and schema changes through `vsql schema update`; a write sent to `query` gets the API's own refusal, printed as it comes. `query` also only ever runs on your sign-in — with a KeelBase secret set it refuses locally instead of reaching the server (see [Two ways to authenticate](#two-ways-to-authenticate-for-two-jobs) above). `describe` reads `information_schema`, which the same guard refuses on the hosted API for a tenant key.
+The hosted query endpoint is **read-only for tenant data** until row-level security lands. Row writes go through `vsql insert` and schema changes through `vsql schema update`; a write sent to `query` gets the API's own refusal, printed as it comes. `query` also only ever runs on your sign-in — with a KeelBase secret set it refuses locally instead of reaching the server (see [Two ways to authenticate](#two-ways-to-authenticate-for-two-jobs) above). `describe` no longer uses it: it reads the active schema, like `tables` (see below).
 
 Options: `--format <table|json|csv|raw>` (default `table`, `csv` when piped), `--file <path>`, `--host <url>`, `--profile <name>`.
 
@@ -103,6 +103,15 @@ vsql tables vibe_agents       # just vibe_agents' tables
 ```
 
 Both read `GET /v1/schemas` — the Vibe-native schema listing, not `information_schema` (which 403s for a tenant key; `tables` used to hit it and inherited that failure). `schemas` shows every collection you have, even ones with no documents yet — `collections` only lists ones that already have some. Both work with a KeelBase secret. The old `--schema <name>` flag on `tables` (a Postgres schema namespace) no longer applies — there is no such namespace here — and is refused locally with a pointer to `vsql schemas`.
+
+### `vsql describe <table> [collection]`
+
+```bash
+vsql describe notes             # the columns of table "notes"
+vsql describe notes vibe_app    # name the collection when the table is in more than one
+```
+
+Reads `GET /v1/schemas`, like `tables`, so it works with a KeelBase secret. It prints each column's `column_name`, `type`, `format` (for example `date-time`), `pk`, `auto_increment` and `nullable`, in the schema's own column order. The schema has no nullability flag, so `nullable` is `YES` when the column is not in the table's `required` list. It does not print a column's `default` or `enum` values, even when the schema sets them (the SQL version printed `column_default`); run `vsql schema show <collection>` to read them. A table name found in more than one collection is refused with `AMBIGUOUS_TABLE` and the collections named; an unknown table is `TABLE_NOT_FOUND`.
 
 ### `vsql schema show <collection>` / `vsql schema update <collection> --file schema.json`
 

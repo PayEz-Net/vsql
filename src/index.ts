@@ -20,6 +20,7 @@ import {
 } from './config.js';
 import { formatRows, detectFormat, type Format } from './format.js';
 import { fatal } from './errors.js';
+import { describeTable } from './describe.js';
 import { createRequire } from 'node:module';
 
 /**
@@ -441,14 +442,13 @@ async function run(): Promise<void> {
     }
 
     case 'describe': {
-      if (!positional) fatal('NO_TABLE', 'No table name provided.', 'Usage: vsql describe <table>');
+      // PAY-2052: from the active schema (GET /v1/schemas), like `tables`. information_schema is refused for tenant keys.
+      if (!positional) fatal('NO_TABLE', 'No table name provided.', 'Usage: vsql describe <table> [collection]');
       const conn = await resolveConn(flags);
-      const sql = `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = '${positional}' ORDER BY ordinal_position`;
-      const result = await client.query(conn, sql);
-      const rows = result.data ?? result.rows ?? [];
-      if (rows.length === 0) fatal('TABLE_NOT_FOUND', `Table "${positional}" not found or has no columns.`);
-      const format = detectFormat(flags.format);
-      console.log(formatRows(rows, format));
+      const out = describeTable(await client.listSchemas(conn), positional, positionals[1]);
+      if ('code' in out) fatal(out.code, out.message, out.hint);
+      if (out.rows.length === 0) { console.log(`${out.collection}.${positional}: no columns.`); break; }
+      console.log(formatRows(out.rows, detectFormat(flags.format)));
       break;
     }
 
@@ -777,7 +777,7 @@ Commands:
   query <sql>              Execute a SQL query (sign-in only)
   tables [collection]      List tables - one collection's, or all grouped by collection
   schemas                  List every collection and its active schema (including empty ones)
-  describe <table>         Show column details for a table
+  describe <table> [collection]  Show a table's columns (from the schema; name the collection if the table is in several)
   schema show <collection> Dump active JSON schema
   schema update <col>      Push schema from file
   insert <col> <table>     Insert documents
