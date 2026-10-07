@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.5 — 2026-10-07
+
+PAY-1977. `vsql login` (device code) could not complete against an IdP whose poll endpoint requires `client_id` in the body: the CLI polled with only `{device_code}`, got a 400 "ClientId is required", and reported `Unknown error: unknown`.
+
+### Fixed
+- **The device-code poll now sends `client_id` in the request body as well as the `X-Client-Id` header** (RFC 8628 puts it in the form body; the header stays for older servers).
+
+### Note
+- Versions before 1.3.0 (the 1.1.x line on npm) rewrote a dev IdP host to `http://<host>:3600/auth/device` and ignored the verification URL the IdP returned. 1.3.x shows the IdP's `verification_url` as given; there is no rewrite left. Upgrade if `vsql login` prints a `:3600` address.
+
 ## 1.3.4 — 2026-10-06
 
 PAY-2052. `vsql describe` was the one command still on raw SQL; the hosted API refuses `information_schema` to a tenant key (403, measured by Nextpert-Scout on dev-93, mail 69331), so `describe` failed for every key-mode user, as `tables` did before 1.3.3.

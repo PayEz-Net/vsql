@@ -467,3 +467,13 @@ export function describeHealthSource(flags: { host?: string; profile?: string })
   else hostSource = 'none';
   return { mode: profile.access_token ? 'sign-in' : 'anonymous', hostSource };
 }
+
+/**
+ * PAY-1977: the body of POST /api/ExternalAuth/agent-device/poll. The server reads the client from the body (RFC 8628) and
+ * only falls back to X-Client-Id when it is absent; a deployed IdP whose DTO treats ClientId as required answers 400
+ * "ClientId is required" to a body of only {device_code}, which the CLI used to report as "Unknown error: unknown".
+ * So the client goes in the body AND the X-Client-Id header (kept for older servers).
+ */
+export function devicePollBody(deviceCode: string, client: string): string {
+  return JSON.stringify({ device_code: deviceCode, client_id: client });
+}
