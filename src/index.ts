@@ -15,6 +15,7 @@ import {
   idpBase,
   clientId,
   deviceId,
+  devicePollBody,
   loadDotEnv,
   type Profile,
 } from './config.js';
@@ -168,7 +169,7 @@ async function startDeviceAuth(): Promise<{ device_code: string; user_code: stri
 }
 
 async function pollDeviceAuth(deviceCode: string): Promise<{ success: boolean; access_token?: string; refresh_token?: string; expires_in?: number; error?: string }> {
-  const body = JSON.stringify({ device_code: deviceCode });
+  const body = devicePollBody(deviceCode, clientId());
   const response = await fetch(`${idpBase()}/api/ExternalAuth/agent-device/poll`, {
     method: 'POST',
     headers: {
