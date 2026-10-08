@@ -11,7 +11,7 @@ Zero runtime dependencies. Node.js 18+. Windows, macOS and Linux.
 ## Install
 
 ```bash
-npm install -g https://github.com/PayEz-Net/vsql/releases/download/v1.3.3/vsql-1.3.3.tgz
+npm install -g https://github.com/PayEz-Net/vsql/releases/download/v1.3.5/vsql-1.3.5.tgz
 vsql version
 ```
 
