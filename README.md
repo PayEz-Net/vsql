@@ -80,6 +80,26 @@ With both variables set, every call goes through the identity service's proxy (`
 - **The signature covers the timestamp, method and endpoint, not the request body.** A fix is tracked.
 - `--host` does not apply in this mode; unset the two variables to use `--host` with `vsql login`.
 
+## Beta and production environments
+
+A KeelBase account can own more than one **environment**. Each environment is a separate KeelBase client with its own client id, its own secret, its own data, its own members and its own daily caps — like two separate projects. Use one for beta and one for production.
+
+Create one in the portal: **Account → KeelBase → New environment**. Give it a name and, optionally, a **Site URL** — the app's origin, e.g. `https://beta.example.com` (just the address: no path, no query, no `#`). If you set one, that environment's users can sign in from that address; leave it blank and you can set it later.
+
+Each environment is **one set of variables**:
+
+```bash
+KEELBASE_CLIENT_ID=<your Tenant>            # your Tenant, as shown on that environment's KeelBase page
+VIBE_CLIENT_ID=vibe_...                      # that environment's KeelBase client id
+VIBE_HMAC_KEY=...                           # that environment's KeelBase secret
+VSQL_IDP_URL=https://idp.payez.net          # the identity service
+VSQL_HOST=<the VibeSQL API URL>             # the hosted VibeSQL API
+```
+
+So **two environments are two `.env` files** (or two shell profiles): you switch environments by loading the other file. `vsql` reads `.env` from the current directory, so a project folder per environment is the simplest arrangement. A new environment starts **empty** — no data, no users, its own keys — so nothing leaks between them.
+
+The same email can be a member of both environments and signs in with the same password; what it can reach is per environment.
+
 ## Commands
 
 ### `vsql query <sql>`
