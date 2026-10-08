@@ -84,7 +84,9 @@ With both variables set, every call goes through the identity service's proxy (`
 
 A KeelBase account can own more than one **environment**. Each environment is a separate KeelBase client with its own client id, its own secret, its own data, its own members and its own daily caps — like two separate projects. Use one for beta and one for production.
 
-Create one in the portal: **Account → KeelBase → New environment**. Give it a name and, optionally, a **Site URL** — the app's origin, e.g. `https://beta.example.com` (just the address: no path, no query, no `#`). If you set one, that environment's users can sign in from that address; leave it blank and you can set it later.
+Create one in the portal: **Account → KeelBase → New environment**. Give it a name and, optionally, a **Site URL** — the app's origin, e.g. `https://beta.example.com` (just the address: no path, no query, no `#`). If you set one, that environment's users can sign in from that address. The Site URL can only be set when you create the environment; changing it afterwards is a tracked follow-up, so if you need it changed, contact support.
+
+**Vibe Agents is a per-person entitlement**, so it shows the same on every environment card — enabling it does not belong to one environment.
 
 Each environment is **one set of variables**:
 
@@ -96,7 +98,7 @@ VSQL_IDP_URL=https://idp.payez.net          # the identity service
 VSQL_HOST=<the VibeSQL API URL>             # the hosted VibeSQL API
 ```
 
-So **two environments are two `.env` files** (or two shell profiles): you switch environments by loading the other file. `vsql` reads `.env` from the current directory, so a project folder per environment is the simplest arrangement. A new environment starts **empty** — no data, no users, its own keys — so nothing leaks between them.
+So **two environments are two `.env` files** (or two shell profiles): you switch environments by loading the other file. `vsql` reads `.env` from the current directory, so a project folder per environment is the simplest arrangement. A new environment starts **empty of your data** — no rows, no users, its own keys — so nothing is shared between them.
 
 The same email can be a member of both environments and signs in with the same password; what it can reach is per environment.
 
