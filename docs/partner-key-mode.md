@@ -56,7 +56,7 @@ Walked on dev-93 with vsql 1.3.3 as a healed MvpOnly test client, against the on
 | `replace <id> --data '{...}'` | works (PUT) | `PUT .../<table>/<id>` |
 | `delete <id> --yes` | works; without `--yes` in a script it is refused locally (`CONFIRMATION_REQUIRED`); a second delete says `NOT_FOUND` | `DELETE .../<table>/<id>` |
 | `query "SELECT ..."` | **refused locally** (`NOT_WITH_KEELBASE_SECRET`), nothing sent | none |
-| `describe <table>` | **fails in 1.3.3**: not refused locally, sends raw SQL, answers 403 `FORBIDDEN` on dev-93 | `POST /v1/vsql/query` |
+| `describe <table> [collection]` | **works from 1.3.5**: reads the active schema, like `tables` [read: source at tag `v1.3.5`, `src/index.ts` `case 'describe'` calls `listSchemas`; CHANGELOG PAY-2052. Not yet walked on a live server in key mode]. In 1.3.3 it failed: not refused locally, sent raw SQL, answered 403 `FORBIDDEN` on dev-93 [measured: Nextpert-Scout, 1.3.3] | `GET /v1/schemas` (1.3.5); `POST /v1/vsql/query` (1.3.3) |
 | `schema update`, `rollback` (no `--list`) | refused locally (`NOT_WITH_KEELBASE_SECRET`) [measured on 1.3.0; for 1.3.3 read in source: `refuseDdlWithKey`] | none |
 
 Notes:
@@ -65,11 +65,11 @@ Notes:
 - Raw SQL (`POST /v1/vsql/query`) is refused for everyone except a platform administrator or a configured first-party client on builds that have the PAY-1844 gate (`RAW_SQL_PLATFORM_ADMIN_ONLY`) [read: Core `VibeSqlController.cs`]. dev-93 does not have that gate: the 403 seen there reads `FORBIDDEN` and comes from the blocked-pattern guard, a different check. The raw-SQL route is also not tenant-safe today on production, which has row-level security on 0 tables [read: PAY-2058]. A key-mode client should not expect to run SQL.
 - **Sign-in mode** (`vsql login`) is what `query` and schema changes use. I have not walked it: it needs a plain member user on dev-93 that does not exist yet. Read from the README: `vsql login` prints a code, and the approval screen does not exist yet, so the signed-in user approves the code with `POST {VSQL_IDP_URL}/api/ExternalAuth/agent-device/approve` using their own token; `vsql login --passwordless you@example.com` sends a 6-digit code by email instead. What `query` returns to a plain tenant user is **not measured**.
 
-### `describe` until 1.3.4
+### `describe`: fixed in 1.3.5
 
-- In the released 1.3.3, `describe` does not work in key mode (above).
-- Use `vsql schema show <collection>`: it returns each table's `properties` (type, format, `x-vibe-pk`, `x-vibe-auto-increment`, description) and `required` list [measured: Nextpert-Scout, dev-93, 1.3.3].
-- `describe` was moved onto the schema route (`GET /v1/schemas`) in vsql PR 10, which is merged to `main` with `package.json` at 1.3.4. **No 1.3.4 release exists**; the install URL above is still 1.3.3. To use the fix now you have to build from source (see the README). I read that change's code and ran its tests and mutants (71 tests) but have not run it against a live server [measured: tests, Nextpert-Scout, PR 10 gate].
+- **1.3.5 and later:** `describe` works in key mode. It reads `GET /v1/schemas`, the same HMAC-signed route `tables` uses, and prints `column_name`, `type`, `format`, `pk`, `auto_increment` and `nullable` [read: source at tag `v1.3.5`; CHANGELOG PAY-2052; QAPert read the same lines, mail 72226]. Nobody has yet run it against a live server with a key: the PAY-2052 walk on dev-93 is that measurement, and this line should carry its result when it exists.
+- **The release exists.** v1.3.5 was published on 2026-10-08, and `https://github.com/PayEz-Net/vsql/releases/download/v1.3.5/vsql-1.3.5.tgz` answers 200 [measured: NextPert, 2026-10-11, HTTP status only; I did not install it]. There was never a 1.3.4 release: the fix went from `main` at 1.3.4 straight to the 1.3.5 release. The install line in section 1 and every [measured] walk on this page are still 1.3.3.
+- **On 1.3.3 only:** `describe` does not work in key mode (table above). Use `vsql schema show <collection>` instead: it returns each table's `properties` (type, format, `x-vibe-pk`, `x-vibe-auto-increment`, description) and `required` list [measured: Nextpert-Scout, dev-93, 1.3.3].
 
 ## 4. The enterprise routes
 
